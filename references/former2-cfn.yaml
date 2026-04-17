@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  aws-reverse-skill Phase 3 — security-hardened Former2 EC2 host.
+  Private subnet, no public IP, zero ingress SG, egress 443 to VPC only,
+  IMDSv2 required, optional VPC Interface + S3 Gateway endpoints for SSM path.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Target VPC (must have DNS hostnames + DNS resolution enabled).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet where the Former2 EC2 instance is launched.
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    Description: EC2 instance type (arm64 / Graviton). Match AMI architecture.
+  StackTag:
+    Type: String
+    Default: aws-reverse-skill
+    Description: Tag value applied to all taggable resources.
+  CreateEndpoints:
+    Type: String
+    Default: 'Yes'
+    AllowedValues: ['Yes', 'No']
+    Description: Set to 'No' if the VPC already has ssm/ssmmessages/ec2messages/logs/s3 endpoints.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Amazon Linux 2023 arm64 AMI resolved via SSM Public Parameter.
+
+Conditions:
+  ShouldCreateEndpoints: !Equals [!Ref CreateEndpoints, 'Yes']
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Tags:
+        - Key: Name
+          Value: !Ref StackTag
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Former2 EC2 - zero ingress, egress 443 only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 10.0.0.0/8
+          Description: HTTPS to VPC endpoints (RFC1918 10/8)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 172.16.0.0/12
+          Description: HTTPS to VPC endpoints (RFC1918 172.16/12)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 192.168.0.0/16
+          Description: HTTPS to VPC endpoints (RFC1918 192.168/16)
+      Tags:
+        - Key: Name
+          Value: !Ref StackTag
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: ShouldCreateEndpoints
+    Properties:
+      GroupDescription: VPC Interface Endpoints - allow 443 from Former2 EC2 SG
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
+          Description: 443 from Former2 EC2 SG
+      Tags:
+        - Key: Name
+          Value: !Sub '${StackTag}-endpoints'
+
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateEndpoints
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref SubnetId]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateEndpoints
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref SubnetId]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateEndpoints
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref SubnetId]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateEndpoints
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref SubnetId]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateEndpoints
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+
+  Former2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Ref StackTag
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -eux
+          dnf install -y nginx git
+          git clone https://github.com/iann0036/former2 /opt/former2
+          cat >/etc/nginx/conf.d/former2.conf <<'NGINX'
+          server {
+            listen 127.0.0.1:80;
+            root /opt/former2/dist;
+            index index.html;
+            location / { try_files $uri $uri/ =404; }
+          }
+          NGINX
+          systemctl enable --now nginx
+          mkdir -p /home/ec2-user/former2-exports
+          chown ec2-user:ec2-user /home/ec2-user/former2-exports
+          cat >/home/ec2-user/get-iam-creds.sh <<'CREDS'
+          #!/bin/bash
+          set -euo pipefail
+          TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          ROLE=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" \
+            http://169.254.169.254/latest/meta-data/iam/security-credentials/)
+          curl -sH "X-aws-ec2-metadata-token: $TOKEN" \
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/$ROLE"
+          CREDS
+          chmod +x /home/ec2-user/get-iam-creds.sh
+          chown ec2-user:ec2-user /home/ec2-user/get-iam-creds.sh
+
+Outputs:
+  InstanceId:
+    Description: EC2 instance ID for SSM Session Manager
+    Value: !Ref Former2Instance
+  PortForwardCommand:
+    Description: Local command to open http://localhost:8080 to Former2 UI
+    Value: !Sub >-
+      aws ssm start-session --region ${AWS::Region}
+      --target ${Former2Instance}
+      --document-name AWS-StartPortForwardingSession
+      --parameters '{"portNumber":["80"],"localPortNumber":["8080"]}'
+  TearDownCommand:
+    Description: Delete this stack when scan is done
+    Value: !Sub 'bash scripts/teardown.sh --stack-name ${AWS::StackName} --region ${AWS::Region}'
