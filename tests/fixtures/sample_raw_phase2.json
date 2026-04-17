@@ -1,0 +1,122 @@
+{
+  "resources": [
+    {
+      "Type": "AWS::Lambda::Function",
+      "PhysicalId": "myapp-processor",
+      "Region": "ap-northeast-1",
+      "Tags": {"Environment": "prod", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::RDS::DBInstance",
+      "PhysicalId": "myapp-db-prod",
+      "Region": "ap-northeast-1",
+      "Engine": "mysql",
+      "AllocatedStorage": 100,
+      "Tags": {"Environment": "prod", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::DynamoDB::Table",
+      "PhysicalId": "myapp-sessions",
+      "Region": "ap-northeast-1",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::S3::Bucket",
+      "PhysicalId": "myapp-data-bucket",
+      "Region": "ap-northeast-1",
+      "Tags": {"Environment": "prod", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::EFS::FileSystem",
+      "PhysicalId": "fs-0abc12345",
+      "Region": "ap-northeast-1",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::SecretsManager::Secret",
+      "PhysicalId": "myapp/db/password",
+      "Region": "ap-northeast-1",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::EC2::Instance",
+      "PhysicalId": "i-0abcdef1234567890",
+      "Region": "ap-northeast-1",
+      "ImageId": "ami-0abcdef1234567890",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::ECR::Repository",
+      "PhysicalId": "myapp-image-repo",
+      "Region": "ap-northeast-1",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::EC2::VPCPeeringConnection",
+      "PhysicalId": "pcx-0abc123def",
+      "Region": "ap-northeast-1",
+      "PeerOwnerId": "210987654321",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::EC2::TransitGatewayAttachment",
+      "PhysicalId": "tgw-attach-0abc",
+      "Region": "ap-northeast-1",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::Route53::HostedZone",
+      "PhysicalId": "Z1234567890ABCDEFGHIJ",
+      "Name": "api.myapp.example.com",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::IAM::Role",
+      "PhysicalId": "myapp-cross-account-role",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::999988887777:root"},
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::KMS::Key",
+      "PhysicalId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "Region": "ap-northeast-1",
+      "MultiRegion": false,
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::EKS::Cluster",
+      "PhysicalId": "myapp-cluster",
+      "Region": "ap-northeast-1",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::Logs::LogGroup",
+      "PhysicalId": "/aws/lambda/myapp-processor",
+      "Region": "ap-northeast-1",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::Events::Rule",
+      "PhysicalId": "myapp-eventbus-rule",
+      "Region": "ap-northeast-1",
+      "EventBusName": "default",
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::CertificateManager::Certificate",
+      "PhysicalId": "arn:aws:acm:ap-northeast-1:123456789012:certificate/abc",
+      "Region": "ap-northeast-1",
+      "DomainName": "api.myapp.example.com",
+      "Tags": {"Project": "myapp"}
+    }
+  ]
+}

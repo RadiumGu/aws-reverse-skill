@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# precheck.sh — Pre-deployment validation for cleaned CFN template.
+# precheck.sh — Thin wrapper around precheck.py for shell invocation.
 #
 # Usage:
-#   bash scripts/precheck.sh <template-file>
+#   bash scripts/precheck.sh <template-file> [--deep] [--raw <raw.json>] \
+#                            [--target-region <r>] [--output <path>]
 #
-# Returns:
-#   0 if all checks pass, non-zero on first failure.
+# For scripted / tested use, invoke precheck.py directly:
+#   python scripts/precheck.py --template cleaned.yml --deep --output out/precheck-report.md
+#
+# Exit codes:
+#   0 — no failures (warnings allowed)
+#   1 — missing args / missing template
+#   2 — one or more failing checks
 
 set -euo pipefail
 
 TEMPLATE="${1:-}"
 
 if [[ -z "$TEMPLATE" ]]; then
-    echo "Usage: bash scripts/precheck.sh <template-file>" >&2
+    echo "Usage: bash scripts/precheck.sh <template-file> [--deep] [--raw <raw.json>] [--target-region <r>] [--output <path>]" >&2
     exit 1
 fi
 
@@ -21,33 +27,11 @@ if [[ ! -f "$TEMPLATE" ]]; then
     exit 1
 fi
 
-echo "==> Precheck: $TEMPLATE"
-echo ""
+shift
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ---------------------------------------------------------------------------
-# Step 1: cfn-lint
-# ---------------------------------------------------------------------------
-echo "--- [1/2] cfn-lint ---"
-if command -v cfn-lint &>/dev/null; then
-    cfn-lint "$TEMPLATE"
-    echo "    cfn-lint: PASSED"
-else
-    echo "    WARNING: cfn-lint not found — skipping (run: pip install cfn-lint)"
-fi
-echo ""
-
-# ---------------------------------------------------------------------------
-# Step 2: aws cloudformation validate-template
-# ---------------------------------------------------------------------------
-echo "--- [2/2] aws cloudformation validate-template ---"
-if command -v aws &>/dev/null; then
-    aws cloudformation validate-template \
-        --template-body "file://${TEMPLATE}" \
-        --output text
-    echo "    validate-template: PASSED"
-else
-    echo "    WARNING: aws CLI not found — skipping validate-template"
-fi
-echo ""
-
-echo "==> Precheck complete: $TEMPLATE"
+python3 "$SCRIPT_DIR/precheck.py" --template "$TEMPLATE" "$@" || {
+    rc=$?
+    echo "precheck.py exited with status ${rc}" >&2
+    exit "$rc"
+}

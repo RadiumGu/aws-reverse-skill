@@ -11,3 +11,4 @@ cfn-filtered.yml
 cleaned.yml
 filtered.json
 .env
+doc/

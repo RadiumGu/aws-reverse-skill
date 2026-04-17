@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Phase 2 fixture — covers KMS / Peering / Route53 / IAM cross-account / S3.
+
+Resources:
+
+  MyappEncryptedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: myapp-encrypted-bucket
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+
+  MyappPeering:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: vpc-0abc123def4567890
+      PeerVpcId: vpc-0def456abc7890123
+      PeerOwnerId: '210987654321'
+
+  MyappTgwAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: tgw-0abcdef
+      VpcId: vpc-0abc123def4567890
+      SubnetIds:
+        - subnet-0abcdef
+
+  MyappRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: Z1234567890ABCDEFGHIJ
+      Name: api.myapp.example.com
+      Type: A
+      TTL: 300
+      ResourceRecords:
+        - 10.0.0.1
+
+  MyappExternalRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: myapp-cross-account-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::999988887777:root
+            Action: sts:AssumeRole
+
+  MyappDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: myapp-global-data-bucket
