@@ -1,6 +1,6 @@
 # aws-reverse-skill
 
-**Version**: 2.0 (Phase 2 — Review Loop + Deployment Advice)
+**Version**: 3.0 (Phase 3 — Mode A Standard + Mode B In-Account)
 **Host**: Claude Code / Kiro / OpenClaw (AgentSkill spec)
 
 ---
@@ -8,6 +8,8 @@
 ## Trigger Keywords
 
 Activate this skill when the user says any of:
+
+### Mode A — Standard (default)
 
 - "导出 AWS 资源到 CFN"
 - "生成 CloudFormation" / "生成 CFN"
@@ -20,6 +22,37 @@ Activate this skill when the user says any of:
 - "replicate AWS environment"
 - "跨账号部署" / "cross-account deploy"
 - "跨 region DR" / "disaster recovery"
+
+### Mode B — In-Account Deployment
+
+- "in-account mode"
+- "deploy former2 inside the account"
+- "run former2 on EC2"
+- "SSM port forward"
+- "VPC-only workflow"
+- "in-account scan"
+
+---
+
+## Mode Decision Tree
+
+```
+Does the user need the scan tooling to live inside the target AWS account
+(e.g. credentials must not leave the account, ops/audit requires the scanner
+to be an auditable in-VPC asset, or the account is in a regulated boundary)?
+
+  ├── No  → Mode A — Standard (local npm CLI, 11 steps)
+  │           Default for everyday reverse-engineering and IaC bootstrap.
+  │
+  └── Yes → Mode B — In-Account Deployment (EC2 + SSM, 8 steps)
+              Choose only when the team prefers or requires keeping the
+              scanner on an account-owned EC2 instance for operational or
+              auditing reasons. Mode B reuses Mode A steps 4-11 verbatim.
+```
+
+Default to Mode A. Switch to Mode B only when the user explicitly requests
+it or states a constraint (compliance boundary, no-egress laptop policy,
+audit requirement) that Mode A cannot satisfy.
 
 ---
 
@@ -43,7 +76,7 @@ New scripts:
 
 ---
 
-## Standard Mode Flow (11 Steps, with Review Loop)
+## Mode A — Standard Flow (11 Steps, with Review Loop)
 
 ### Step 1 — Confirm parameters
 
@@ -255,6 +288,188 @@ Step 11 deploy + archive review + diff + manual-tasks
 
 ---
 
+## Mode B — In-Account Deployment Flow (8 Steps)
+
+Mode B runs the scanner on an EC2 instance inside the target AWS account.
+The operator reaches the Former2 UI through an SSM port-forward tunnel, so
+no AWS credentials ever leave the account and the laptop never opens an
+inbound or direct outbound AWS API path. Once the CFN YAML has been
+exported off the EC2 instance, the rest of the pipeline is identical to
+Mode A (select → rewrite → precheck → review loop → apply → deploy).
+
+The full walkthrough, including troubleshooting and operational checklist,
+is in [workflows/in-account-mode.md](workflows/in-account-mode.md).
+
+### Step B1 — Confirm parameters
+
+```
+Source region?             e.g. ap-northeast-1
+Target region?             e.g. ap-northeast-1 (may equal source)
+AWS CLI profile?           e.g. compliance / target
+Source VPC id?             vpc-xxxxxxxxxxxxxxxxx (must have DNS hostnames on)
+Source private subnet id?  subnet-xxxxxxxxxxxxxxxxx (no route to IGW)
+Stack name?                e.g. former2-reverse
+Instance type?             t4g.medium (default)
+Create VPC endpoints?      Yes (default) / No (VPC already has them)
+```
+
+Verify `aws sts get-caller-identity` and `session-manager-plugin --version`
+return cleanly before continuing.
+
+### Step B2 — Deploy the Former2 EC2 stack (idempotent)
+
+```bash
+bash scripts/deploy-former2.sh \
+  --vpc-id vpc-xxxxxxxx \
+  --subnet-id subnet-xxxxxxxx \
+  --stack-name former2-reverse \
+  --region ap-northeast-1 \
+  --profile compliance
+```
+
+Skip if `aws cloudformation describe-stacks --stack-name former2-reverse`
+already returns `CREATE_COMPLETE` / `UPDATE_COMPLETE`. The stack's
+`Outputs.InstanceId` is the target for every later step. If the VPC already
+has ssm / ssmmessages / ec2messages / logs / s3 endpoints, add
+`--create-endpoints No` to avoid duplicate endpoints.
+
+Template: [references/former2-cfn.yaml](references/former2-cfn.yaml).
+
+### Step B3 — Start the SSM port-forward tunnel
+
+```bash
+bash scripts/ssm-portforward.sh \
+  --instance-id i-0123456789abcdef0 \
+  --region ap-northeast-1 \
+  --local-port 8080 \
+  --remote-port 80 \
+  --profile compliance
+```
+
+This script runs in the foreground. Keep the terminal open for the full
+scan; Ctrl+C tears the tunnel down. Open a second terminal for Steps B4
+and B6.
+
+### Step B4 — Fetch IMDS credentials on the EC2 instance
+
+Start an interactive SSM shell in a separate terminal:
+
+```bash
+aws ssm start-session \
+  --target i-0123456789abcdef0 \
+  --region ap-northeast-1 \
+  --profile compliance
+```
+
+Inside the session run:
+
+```bash
+bash /home/ec2-user/get-iam-creds.sh
+```
+
+The script prints the instance-role temporary credentials
+(`AccessKeyId` / `SecretAccessKey` / `Token` / `Expiration`) from IMDSv2.
+Copy the three fields into the Former2 UI → **Credentials** panel. These
+credentials never leave the SSM session transcript and the laptop, and
+they expire with the instance role's session (typically 6 hours).
+
+### Step B5 — Scan and export inside Former2 UI
+
+On the laptop open `http://localhost:8080` (served by the tunnel from
+Step B3). In the Former2 UI:
+
+1. Paste credentials from Step B4 into the **Credentials** panel.
+2. Pick source region and services, click **Scan**.
+3. When scanning finishes, switch to the **Generate** tab and export as
+   CloudFormation YAML.
+4. Save the file inside the instance at `/home/ec2-user/former2-exports/`
+   (create one if it does not exist — the UserData already provisioned it).
+   Keep the filename predictable, e.g. `latest.yml`.
+
+The skill does not automate this step — Former2's UI is the scanner.
+
+### Step B6 — Retrieve the exported file
+
+```bash
+bash scripts/fetch-export.sh \
+  --instance-id i-0123456789abcdef0 \
+  --region ap-northeast-1 \
+  --remote-path /home/ec2-user/former2-exports/latest.yml \
+  --local out/cfn-from-former2.yml \
+  --profile compliance
+```
+
+The script provisions a one-shot transfer bucket
+(`skill-former2-transfer-<account>-<region>`) with SSE-AES256, public
+access block, and a 1-day lifecycle expiration. The object is copied via
+SSM `send-command` → S3 → local download, and removed from S3
+immediately afterward.
+
+### Step B7 — Reuse Mode A Steps 4-11
+
+The file at `out/cfn-from-former2.yml` now plays the role of
+`out/cfn-full.yml` in Mode A. From here, run **Mode A Steps 4-11**
+verbatim:
+
+- Step 4 — `select.py` (`--dry-run` → commit) + `npx former2 filter`
+  (use `out/cfn-from-former2.yml` as the `--input`)
+- Step 5 — `rewrite_cfn.py --preset`
+- Step 6 — `precheck.py --deep`
+- Step 7 — `generate_review.py` + `deployment_advice.py`
+- Step 8 — admin edits `out/review.md`
+- Step 9 — `apply_review.py`
+- Step 10 — re-precheck; loop back to Step 8 until clean
+- Step 11 — `aws cloudformation deploy` + audit archive
+
+Mode A's Step 2 (local `scan.js`) and Step 3 (preview) are unnecessary
+because Step B5 already produced a scoped template. If preview is still
+useful, run `python3 scripts/preview.py --input out/cfn-from-former2.yml
+--group-by service` (the preview script tolerates either raw-scan JSON or
+exported YAML via `--input-type yaml`).
+
+### Step B8 — Optional teardown
+
+```bash
+bash scripts/teardown.sh \
+  --stack-name former2-reverse \
+  --region ap-northeast-1 \
+  --profile compliance
+```
+
+Teardown is deliberately manual: delete the stack only after the CFN
+artifact is safely archived and the admin has decided no follow-up scan
+is needed. The transfer S3 bucket is left in place (its lifecycle expires
+objects at 1 day) — delete it manually if policy requires a zero-bucket
+aftermath.
+
+---
+
+## Mode A to Mode B Mapping
+
+| Mode A step | Mode B step | Notes |
+|-------------|-------------|-------|
+| Step 1 — confirm parameters | Step B1 — confirm parameters | Mode B adds VPC id, subnet id, stack name, endpoint toggle. |
+| Step 2 — `scan.js` (local npm CLI) | Steps B2 + B3 + B4 + B5 | Mode B replaces the local CLI with an in-account EC2 scan via SSM tunnel + Former2 UI. |
+| Step 3 — `preview.py` on raw.json | (Optional) `preview.py --input out/cfn-from-former2.yml` | Former2's UI already performs resource grouping; preview is optional in Mode B. |
+| Step 4 — `select.py` + former2 filter | Step B7 (reuses Step 4) | Same scripts; input file is `out/cfn-from-former2.yml`. |
+| Step 5 — `rewrite_cfn.py --preset` | Step B7 (reuses Step 5) | Identical. |
+| Step 6 — `precheck.py --deep` | Step B7 (reuses Step 6) | Identical. |
+| Step 7 — `generate_review.py` + `deployment_advice.py` | Step B7 (reuses Step 7) | Identical. |
+| Step 8 — admin edits `review.md` | Step B7 (reuses Step 8) | Identical. |
+| Step 9 — `apply_review.py` | Step B7 (reuses Step 9) | Identical. |
+| Step 10 — re-precheck loop | Step B7 (reuses Step 10) | Identical. |
+| Step 11 — `cloudformation deploy` | Step B7 (reuses Step 11) | Identical. |
+| (no equivalent) | Step B8 — `teardown.sh` | Removes the Former2 EC2 stack; Mode A has nothing to tear down. |
+| (no equivalent) | `fetch-export.sh` | Mode A never leaves the laptop, so no transfer step is needed. |
+
+Fallback hierarchy: if an admin picked Mode B but a specific Mode A script
+does not behave well with a Former2-exported YAML (e.g. the raw.json-only
+`preview.py --group-by tag` path), fall back to running that script with
+`--input out/cfn-from-former2.yml --input-type yaml` or skip that step and
+carry on — the review loop will still catch issues.
+
+---
+
 ## Error Handling
 
 | Situation | Response |
@@ -271,15 +486,17 @@ Step 11 deploy + archive review + diff + manual-tasks
 
 ---
 
-## Scope Limitations (Phase 2)
+## Scope Limitations (Phase 3)
 
-- **Standard mode only** — no EC2/SSM compliance mode (Phase 3)
 - **No LLM rewriting** — deterministic rules only
 - **No CDK output** — CFN YAML only
 - **KMS cross-account grants** — flagged in review, not auto-rewritten
 - **Data migration** — `deployment-advice.md` emits commands but does not run them
 - **Peering handshake** — emitted as manual task; not executed
 - **review.md schema is strict** — admins must keep the 4-block layout intact
+- **Mode B scanner UI is manual** — Former2 upstream (iann0036) is used as-is;
+  the UI click-through is not automated
+- **Mode B runs one EC2 at a time** — no Organizations-level fan-out
 
 ---
 
@@ -287,30 +504,36 @@ Step 11 deploy + archive review + diff + manual-tasks
 
 ```
 aws-reverse-skill/
-├── SKILL.md                ← this file (v2)
+├── SKILL.md                   ← this file (v3)
 ├── scripts/
-│   ├── scan.js             ← Step 2
-│   ├── cache.py            ← scan cache helper
-│   ├── preview.py          ← Step 3
-│   ├── select.py           ← Step 4 (with --dry-run)
-│   ├── rewrite_cfn.py      ← Step 5 (with --preset)
-│   ├── precheck.py         ← Step 6 + Step 10 (deep AWS checks)
-│   ├── precheck.sh         ← legacy lint wrapper
-│   ├── generate_review.py  ← Step 7 (also --update for Step 10 loop)
-│   ├── apply_review.py     ← Step 9
-│   └── deployment_advice.py ← Step 7 companion
+│   ├── scan.js                ← Mode A Step 2
+│   ├── cache.py               ← scan cache helper
+│   ├── preview.py             ← Mode A Step 3
+│   ├── select.py              ← Step 4 (with --dry-run)
+│   ├── rewrite_cfn.py         ← Step 5 (with --preset)
+│   ├── precheck.py            ← Step 6 + Step 10 (deep AWS checks)
+│   ├── precheck.sh            ← legacy lint wrapper
+│   ├── generate_review.py     ← Step 7 (also --update for Step 10 loop)
+│   ├── apply_review.py        ← Step 9
+│   ├── deployment_advice.py   ← Step 7 companion
+│   ├── deploy-former2.sh      ← Mode B Step B2
+│   ├── ssm-portforward.sh     ← Mode B Step B3
+│   ├── fetch-export.sh        ← Mode B Step B6
+│   └── teardown.sh            ← Mode B Step B8
 ├── config/
 │   ├── default-filters.json
 │   ├── default-rewrites.json
-│   └── rewrite-presets.json ← 4 presets
+│   └── rewrite-presets.json   ← 4 presets
 ├── references/
 │   ├── rewrite-rules.md
-│   └── review-checklist.md
+│   ├── review-checklist.md
+│   └── former2-cfn.yaml       ← Mode B EC2 stack template
 ├── workflows/
 │   ├── export-by-tag.md
-│   ├── export-all.md            ← new
-│   ├── cross-account-deploy.md  ← new — showcases review loop
-│   ├── cross-region-dr.md       ← new — showcases deployment-advice
-│   └── cleanup-default-only.md  ← new
-└── tests/                   ← ≥70 pytest cases
+│   ├── export-all.md
+│   ├── cross-account-deploy.md    ← showcases review loop
+│   ├── cross-region-dr.md         ← showcases deployment-advice
+│   ├── cleanup-default-only.md
+│   └── in-account-mode.md         ← Mode B walkthrough
+└── tests/                      ← 95 pytest cases
 ```
