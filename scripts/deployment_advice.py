@@ -13,6 +13,7 @@ Formats:
 """
 
 import argparse
+import ipaddress
 import json
 import sys
 from dataclasses import dataclass, field
@@ -422,6 +423,144 @@ def rule_acm(resources: list[dict[str, Any]]) -> list[Advice]:
     ]
 
 
+_RFC1918_RANGES: tuple[ipaddress.IPv4Network, ...] = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def _is_public_cidr(cidr: str) -> bool:
+    """Return True if *cidr* is a non-RFC1918 IPv4 CIDR (treated as public).
+
+    Skips IPv6, the unspecified ``0.0.0.0/0`` default route, and any CIDR that
+    is a subnet of an RFC1918 range.
+    """
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except (ValueError, TypeError):
+        return False
+    if isinstance(net, ipaddress.IPv6Network):
+        return False
+    if net.prefixlen == 0:
+        return False
+    return not any(net.subnet_of(rfc) for rfc in _RFC1918_RANGES)
+
+
+def _collect_sg_cidrs(
+    sg_resource: dict[str, Any],
+) -> list[str]:
+    """Return every CidrIp / CidrIpv6 value attached to a SecurityGroup entry.
+
+    Accepts either the flattened former2 scan record (where ingress/egress
+    live at the top level) or a nested ``Properties`` shape that mirrors the
+    CFN structure.
+    """
+    cidrs: list[str] = []
+    containers: list[Any] = []
+
+    props = sg_resource.get("Properties")
+    if isinstance(props, dict):
+        containers.append(props)
+    containers.append(sg_resource)
+
+    for container in containers:
+        for key in ("SecurityGroupIngress", "SecurityGroupEgress",
+                    "IpPermissions", "IpPermissionsEgress"):
+            rules = container.get(key)
+            if not isinstance(rules, list):
+                continue
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                for cidr_key in ("CidrIp", "CidrIpv6"):
+                    val = rule.get(cidr_key)
+                    if isinstance(val, str) and val:
+                        cidrs.append(val)
+                # former2 nested shape: IpRanges / Ipv6Ranges
+                for list_key, range_key in (
+                    ("IpRanges", "CidrIp"),
+                    ("Ipv6Ranges", "CidrIpv6"),
+                ):
+                    entries = rule.get(list_key)
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        if isinstance(entry, dict):
+                            val = entry.get(range_key)
+                            if isinstance(val, str) and val:
+                                cidrs.append(val)
+    return cidrs
+
+
+def rule_prefix_list(resources: list[dict[str, Any]]) -> list[Advice]:
+    """Emit PrefixList advice when 2+ SGs share at least one public CIDR.
+
+    Private (RFC1918) CIDRs and the default route ``0.0.0.0/0`` are ignored;
+    the optimization only pays off for public ranges that would otherwise be
+    repeated literal allow-lists across multiple SGs.
+    """
+    sgs = _of_type(resources, "AWS::EC2::SecurityGroup")
+    if len(sgs) < 2:
+        return []
+
+    cidr_to_sgs: dict[str, list[str]] = {}
+    for sg in sgs:
+        sg_name = sg.get("PhysicalId") or sg.get("LogicalId") or "unknown-sg"
+        seen: set[str] = set()
+        for cidr in _collect_sg_cidrs(sg):
+            if cidr in seen or not _is_public_cidr(cidr):
+                continue
+            seen.add(cidr)
+            cidr_to_sgs.setdefault(cidr, []).append(str(sg_name))
+
+    shared = {
+        cidr: sorted(set(owners))
+        for cidr, owners in cidr_to_sgs.items()
+        if len(set(owners)) >= 2
+    }
+    if not shared:
+        return []
+
+    detail_lines = [
+        f"Duplicate public CIDRs detected across {len({sg for owners in shared.values() for sg in owners})} security groups."
+    ]
+    for cidr in sorted(shared):
+        detail_lines.append(
+            f"- {cidr} appears in: {', '.join(shared[cidr])}"
+        )
+    detail_lines.append(
+        "Recommended: create a Customer-Managed Prefix List (pl-xxx) and "
+        "reference it via SourcePrefixListId on each rule."
+    )
+
+    return [
+        Advice(
+            layer="network",
+            priority="yellow",
+            resource_type="AWS::EC2::SecurityGroup",
+            title=(
+                f"PrefixList 优化建议 — {len(shared)} 个公网 CIDR 在 "
+                f"{len({sg for owners in shared.values() for sg in owners})} 个 SG 中重复"
+            ),
+            detail="\n".join(detail_lines),
+            options=[
+                "⭐ 创建 Customer-Managed Prefix List 集中维护公网 CIDR 列表",
+                "在每条 SG 规则用 SourcePrefixListId 引用 PrefixList",
+                "保留现状（若 CIDR 条目 < 5 且不会扩展）",
+            ],
+            commands=[
+                "aws ec2 create-managed-prefix-list --prefix-list-name <name> "
+                "--address-family IPv4 --max-entries <N> "
+                "--entries Cidr=<cidr>,Description=<desc>",
+                "aws ec2 modify-managed-prefix-list --prefix-list-id <pl-xxx> "
+                "--add-entries Cidr=<cidr>,Description=<desc>",
+            ],
+            resources=sorted(shared),
+        )
+    ]
+
+
 ALL_RULES: list[RuleFn] = [
     rule_rds,
     rule_dynamodb,
@@ -433,6 +572,7 @@ ALL_RULES: list[RuleFn] = [
     rule_vpc_peering,
     rule_tgw,
     rule_route53,
+    rule_prefix_list,
     rule_iam_trust,
     rule_kms_cross,
     rule_eks,

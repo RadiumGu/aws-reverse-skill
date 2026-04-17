@@ -1,0 +1,56 @@
+{
+  "resources": [
+    {
+      "Type": "AWS::EC2::SecurityGroup",
+      "PhysicalId": "sg-web",
+      "GroupName": "web-tier",
+      "Region": "ap-northeast-1",
+      "SecurityGroupIngress": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 443,
+          "ToPort": 443,
+          "CidrIp": "203.0.113.5/32",
+          "Description": "corp-egress"
+        },
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 22,
+          "ToPort": 22,
+          "CidrIp": "10.0.0.0/16",
+          "Description": "vpc-internal (should be ignored)"
+        }
+      ]
+    },
+    {
+      "Type": "AWS::EC2::SecurityGroup",
+      "PhysicalId": "sg-app",
+      "GroupName": "app-tier",
+      "Region": "ap-northeast-1",
+      "SecurityGroupIngress": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 8080,
+          "ToPort": 8080,
+          "CidrIp": "203.0.113.5/32",
+          "Description": "corp-egress"
+        }
+      ]
+    },
+    {
+      "Type": "AWS::EC2::SecurityGroup",
+      "PhysicalId": "sg-db",
+      "GroupName": "db-tier",
+      "Region": "ap-northeast-1",
+      "SecurityGroupIngress": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 3306,
+          "ToPort": 3306,
+          "CidrIp": "198.51.100.10/32",
+          "Description": "admin-only (single-SG — should NOT trigger)"
+        }
+      ]
+    }
+  ]
+}
