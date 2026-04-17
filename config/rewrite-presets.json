@@ -1,0 +1,42 @@
+{
+  "_comment": "Rewrite rule presets for rewrite_cfn.py. Select one via --preset.",
+  "presets": {
+    "cleanup-only": {
+      "description": "Minimal cleanup: deletion policy only (no rewrite of account/region).",
+      "rules": ["deletion_policy"]
+    },
+    "cross-region": {
+      "description": "Same account, different region. Region + AMI + AZ + DeletionPolicy.",
+      "rules": ["region", "ami_id", "az", "deletion_policy"]
+    },
+    "cross-account": {
+      "description": "Different account (same or different region). Full Phase 1 + KMS + IAM principal flag + S3 bucket prefix + peering review.",
+      "rules": [
+        "account_id",
+        "region",
+        "ami_id",
+        "az",
+        "deletion_policy",
+        "kms",
+        "iam_principal",
+        "s3_bucket_name",
+        "peering"
+      ]
+    },
+    "full": {
+      "description": "All rules (Phase 1 + Phase 2).",
+      "rules": [
+        "account_id",
+        "region",
+        "ami_id",
+        "az",
+        "deletion_policy",
+        "kms",
+        "peering",
+        "route53",
+        "iam_principal",
+        "s3_bucket_name"
+      ]
+    }
+  }
+}

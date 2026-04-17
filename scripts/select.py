@@ -133,6 +133,32 @@ def build_regex_filter(physical_ids: list[str]) -> str:
     return "|".join(escaped)
 
 
+def summarize_filtered(
+    filtered: list[dict[str, Any]], original: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Produce a human-readable summary of a filter operation.
+
+    Args:
+        filtered: Resources passing the filter.
+        original: Original (pre-filter) resource list.
+
+    Returns:
+        Dict with ``total_before``, ``total_after``, ``by_service`` (count per
+        AWS service), and ``sample`` (up to 10 physical ids).
+    """
+    by_service: dict[str, int] = {}
+    for r in filtered:
+        rtype = r.get("Type", "")
+        svc = rtype.split("::")[1] if rtype.startswith("AWS::") else "Unknown"
+        by_service[svc] = by_service.get(svc, 0) + 1
+    return {
+        "total_before": len(original),
+        "total_after": len(filtered),
+        "by_service": dict(sorted(by_service.items())),
+        "sample": [r.get("PhysicalId", "") for r in filtered[:10]],
+    }
+
+
 def main() -> None:
     """CLI entry point for select.py."""
     parser = argparse.ArgumentParser(
@@ -177,6 +203,15 @@ def main() -> None:
             "for use with 'former2 filter --search-filter'."
         ),
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Do not write output file. Print summary (counts + by-service + "
+            "sample physical ids) to stderr so users can iterate on filters "
+            "without touching disk."
+        ),
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -208,6 +243,19 @@ def main() -> None:
     }
 
     filtered = apply_filters(resources, filters)
+
+    if args.dry_run:
+        summary = summarize_filtered(filtered, resources)
+        print(
+            f"[dry-run] {summary['total_before']} → {summary['total_after']} resources",
+            file=sys.stderr,
+        )
+        for svc, n in summary["by_service"].items():
+            print(f"  {svc:20s} {n}", file=sys.stderr)
+        if summary["sample"]:
+            print("  sample:", ", ".join(summary["sample"][:5]), file=sys.stderr)
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return
 
     if args.emit_regex_filter:
         ids = [r.get("PhysicalId", "") for r in filtered]
