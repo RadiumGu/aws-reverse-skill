@@ -6,11 +6,11 @@
       "rules": ["deletion_policy"]
     },
     "cross-region": {
-      "description": "Same account, different region. Region + AMI + AZ + DeletionPolicy.",
-      "rules": ["region", "ami_id", "az", "deletion_policy"]
+      "description": "Same account, different region. Region + AMI + AZ + DeletionPolicy + region-locked advisory.",
+      "rules": ["region", "ami_id", "az", "deletion_policy", "region_lock"]
     },
     "cross-account": {
-      "description": "Different account (same or different region). Full Phase 1 + KMS + IAM principal flag + S3 bucket prefix + peering review + VPC/Subnet/SG ID parameterization + SG CIDR classification + nested ARN rewriting.",
+      "description": "Different account (same or different region). Full Phase 1 + KMS + IAM principal flag + S3 bucket prefix + peering review + VPC/Subnet/SG ID parameterization + SG CIDR classification + nested ARN rewriting + region-locked advisory.",
       "rules": [
         "account_id",
         "region",
@@ -24,7 +24,8 @@
         "vpc_resource_ids",
         "sg_cidr",
         "nested_arn_string",
-        "nested_arn_json"
+        "nested_arn_json",
+        "region_lock"
       ]
     },
     "full": {
@@ -43,7 +44,8 @@
         "vpc_resource_ids",
         "sg_cidr",
         "nested_arn_string",
-        "nested_arn_json"
+        "nested_arn_json",
+        "region_lock"
       ]
     }
   }

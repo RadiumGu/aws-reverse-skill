@@ -23,8 +23,10 @@ def test_preset_cross_region_enables_r2_r3_r4_r5():
     presets = load_presets()
     rules = resolve_preset_rules("cross-region", presets)
 
-    assert rules == {"region", "ami_id", "az", "deletion_policy"}
+    assert {"region", "ami_id", "az", "deletion_policy"} <= rules
     assert "account_id" not in rules  # same account, do not rewrite
+    # Hotfix C: region-lock advisory is enabled in cross-region too.
+    assert "region_lock" in rules
 
 
 def test_preset_cross_account_enables_phase2_extensions():
