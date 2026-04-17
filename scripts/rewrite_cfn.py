@@ -15,6 +15,15 @@ Phase 2 rules (opt-in via --preset or --rules):
   R9.  IAM Principal ARN account ID   → ${AWS::AccountId} (and flag external accounts)
   R10. S3 Bucket Name                 → !Sub '${BucketPrefix}-<orig>' + Parameters.BucketPrefix
 
+Phase 3 rules (opt-in — Hotfix A Wave A1):
+  R11. VPC / Subnet / Security Group resource IDs → Parameters
+       - Single VpcId value               → !Ref TargetVpcId
+       - Single SubnetId value            → !Select [0, !Ref TargetSubnetIds]
+       - Single SG ID (GroupId / SourceSG)→ !Select [0, !Ref TargetSecurityGroupIds]
+       - SubnetIds / Subnets / VPCZoneIdentifier list → !Split [",", !Ref TargetSubnetIds]
+       - SecurityGroupIds / VpcSecurityGroupIds / SecurityGroups list
+                                          → !Split [",", !Ref TargetSecurityGroupIds]
+
 Usage:
     python scripts/rewrite_cfn.py \\
         --input cfn-filtered.yml --output cleaned.yml \\
@@ -45,7 +54,12 @@ PHASE1_RULES: frozenset[str] = frozenset(
 PHASE2_RULES: frozenset[str] = frozenset(
     {"kms", "peering", "route53", "iam_principal", "s3_bucket_name"}
 )
+PHASE3_RULES: frozenset[str] = frozenset({"vpc_resource_ids"})
+# Historical ALL_RULES = Phase 1 + 2 (kept for backward compatibility with
+# existing test expectations). Use ALL_RULES_EXTENDED for callers that want
+# every shipped rule including Phase 3+.
 ALL_RULES: frozenset[str] = PHASE1_RULES | PHASE2_RULES
+ALL_RULES_EXTENDED: frozenset[str] = PHASE1_RULES | PHASE2_RULES | PHASE3_RULES
 
 #: Known AWS region codes (commercial partitions).
 KNOWN_REGIONS: frozenset[str] = frozenset(
@@ -76,6 +90,29 @@ _HOSTED_ZONE_PATTERN: re.Pattern[str] = re.compile(r"^Z[0-9A-Z]{4,31}$")
 # Account ID regex — detect 12-digit numbers embedded in strings
 _ACCOUNT_ID_PATTERN: re.Pattern[str] = re.compile(r"\b\d{12}\b")
 
+# R11 patterns — VPC / Subnet / Security Group physical IDs.
+# AWS IDs use 8 or 17 hex chars; accept 3+ to simplify fixtures/tests.
+_VPC_ID_PATTERN: re.Pattern[str] = re.compile(r"^vpc-[0-9a-f]{3,17}$", re.IGNORECASE)
+_SUBNET_ID_PATTERN: re.Pattern[str] = re.compile(r"^subnet-[0-9a-f]{3,17}$", re.IGNORECASE)
+_SG_ID_PATTERN: re.Pattern[str] = re.compile(r"^sg-[0-9a-f]{3,17}$", re.IGNORECASE)
+
+#: Property keys that hold a single VPC ID.
+_VPC_ID_KEYS: frozenset[str] = frozenset({"VpcId", "VPCId"})
+#: Property keys that hold a single subnet ID.
+_SUBNET_SINGLE_KEYS: frozenset[str] = frozenset({"SubnetId"})
+#: Property keys that hold a list of subnet IDs.
+_SUBNET_LIST_KEYS: frozenset[str] = frozenset(
+    {"SubnetIds", "Subnets", "VPCZoneIdentifier"}
+)
+#: Property keys that hold a single security group ID.
+_SG_SINGLE_KEYS: frozenset[str] = frozenset(
+    {"GroupId", "SourceSecurityGroupId", "DestinationSecurityGroupId"}
+)
+#: Property keys that hold a list of security group IDs.
+_SG_LIST_KEYS: frozenset[str] = frozenset(
+    {"SecurityGroupIds", "VpcSecurityGroupIds", "SecurityGroups"}
+)
+
 RETAIN_TYPES: frozenset[str] = frozenset(
     [
         "AWS::RDS::DBInstance",
@@ -102,6 +139,20 @@ _AMI_SSM_DEFAULT = (
 # Pre-parsed YAML template for the !Select [0, !GetAZs ''] expression.
 _yaml_rt = YAML()
 _AZ_SELECT_TEMPLATE: CommentedSeq = _yaml_rt.load("az: !Select [0, !GetAZs '']\n")["az"]
+
+# Pre-parsed R11 expression templates.
+_SPLIT_SUBNETS_TEMPLATE: CommentedSeq = _yaml_rt.load(
+    'x: !Split [",", !Ref TargetSubnetIds]\n'
+)["x"]
+_SPLIT_SGS_TEMPLATE: CommentedSeq = _yaml_rt.load(
+    'x: !Split [",", !Ref TargetSecurityGroupIds]\n'
+)["x"]
+_SELECT_FIRST_SUBNET_TEMPLATE: CommentedSeq = _yaml_rt.load(
+    'x: !Select [0, !Split [",", !Ref TargetSubnetIds]]\n'
+)["x"]
+_SELECT_FIRST_SG_TEMPLATE: CommentedSeq = _yaml_rt.load(
+    'x: !Select [0, !Split [",", !Ref TargetSecurityGroupIds]]\n'
+)["x"]
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +194,21 @@ def is_hosted_zone_id(value: str) -> bool:
     return bool(_HOSTED_ZONE_PATTERN.match(value))
 
 
+def is_vpc_id(value: str) -> bool:
+    """Return True if *value* looks like an EC2 VPC ID (``vpc-…``)."""
+    return isinstance(value, str) and bool(_VPC_ID_PATTERN.match(value))
+
+
+def is_subnet_id(value: str) -> bool:
+    """Return True if *value* looks like an EC2 Subnet ID (``subnet-…``)."""
+    return isinstance(value, str) and bool(_SUBNET_ID_PATTERN.match(value))
+
+
+def is_sg_id(value: str) -> bool:
+    """Return True if *value* looks like a Security Group ID (``sg-…``)."""
+    return isinstance(value, str) and bool(_SG_ID_PATTERN.match(value))
+
+
 def find_external_account_ids(value: str, source_account_id: str) -> list[str]:
     """Return any 12-digit account IDs in *value* that are not *source_account_id*.
 
@@ -169,6 +235,9 @@ class _Context:
         self.kms_arns: list[str] = []
         self.hosted_zone_ids: list[str] = []
         self.s3_buckets: list[str] = []
+        self.vpc_ids: list[str] = []
+        self.subnet_ids: list[str] = []
+        self.security_group_ids: list[str] = []
         self.review_decisions: list[dict[str, Any]] = []
 
 
@@ -401,6 +470,177 @@ def apply_s3_bucket_name_rule(resources: CommentedMap, ctx: _Context) -> None:
             )
 
 
+def _rewrite_vpc_scalar(
+    value: str, ctx: _Context
+) -> TaggedScalar | None:
+    """Return a !Ref replacement for a literal VPC ID, or None if no match."""
+    if not is_vpc_id(value):
+        return None
+    if value not in ctx.vpc_ids:
+        ctx.vpc_ids.append(value)
+    return TaggedScalar(value="TargetVpcId", tag="!Ref")
+
+
+def _rewrite_subnet_scalar(
+    value: str, ctx: _Context
+) -> CommentedSeq | None:
+    """Return a !Select-!Split replacement for a single subnet ID, or None."""
+    if not is_subnet_id(value):
+        return None
+    if value not in ctx.subnet_ids:
+        ctx.subnet_ids.append(value)
+    return copy.deepcopy(_SELECT_FIRST_SUBNET_TEMPLATE)
+
+
+def _rewrite_sg_scalar(
+    value: str, ctx: _Context
+) -> CommentedSeq | None:
+    """Return a !Select-!Split replacement for a single SG ID, or None."""
+    if not is_sg_id(value):
+        return None
+    if value not in ctx.security_group_ids:
+        ctx.security_group_ids.append(value)
+    return copy.deepcopy(_SELECT_FIRST_SG_TEMPLATE)
+
+
+def _rewrite_subnet_list(
+    seq: CommentedSeq | list, ctx: _Context
+) -> CommentedSeq | None:
+    """Replace a list of literal subnet IDs with !Split [..., TargetSubnetIds]."""
+    if not isinstance(seq, (CommentedSeq, list)):
+        return None
+    literal_items = [v for v in seq if isinstance(v, str) and is_subnet_id(v)]
+    if not literal_items or len(literal_items) != len(seq):
+        # Mixed / already-rewritten list — leave alone, but capture literals
+        for v in literal_items:
+            if v not in ctx.subnet_ids:
+                ctx.subnet_ids.append(v)
+        return None
+    for v in literal_items:
+        if v not in ctx.subnet_ids:
+            ctx.subnet_ids.append(v)
+    return copy.deepcopy(_SPLIT_SUBNETS_TEMPLATE)
+
+
+def _rewrite_sg_list(
+    seq: CommentedSeq | list, ctx: _Context
+) -> CommentedSeq | None:
+    """Replace a list of literal SG IDs with !Split [..., TargetSecurityGroupIds]."""
+    if not isinstance(seq, (CommentedSeq, list)):
+        return None
+    literal_items = [v for v in seq if isinstance(v, str) and is_sg_id(v)]
+    if not literal_items or len(literal_items) != len(seq):
+        for v in literal_items:
+            if v not in ctx.security_group_ids:
+                ctx.security_group_ids.append(v)
+        return None
+    for v in literal_items:
+        if v not in ctx.security_group_ids:
+            ctx.security_group_ids.append(v)
+    return copy.deepcopy(_SPLIT_SGS_TEMPLATE)
+
+
+def apply_vpc_resource_ids_rule(
+    resources: CommentedMap, ctx: _Context
+) -> None:
+    """R11 — Replace literal VPC/Subnet/SG IDs with CFN Parameter references.
+
+    Walks each resource's ``Properties`` (shallow + nested maps) looking for
+    keys in the VPC/Subnet/SG key sets. Only literal ID strings matching the
+    AWS resource ID patterns are rewritten; any CFN intrinsic (``!Ref``,
+    ``!GetAtt`` etc.) is left intact.
+    """
+    if "vpc_resource_ids" not in ctx.rules:
+        return
+    if not isinstance(resources, CommentedMap):
+        return
+
+    def _process(node: Any) -> Any:
+        if isinstance(node, CommentedMap):
+            for key in list(node.keys()):
+                val = node[key]
+                skey = str(key)
+                if skey in _VPC_ID_KEYS and isinstance(val, str):
+                    new = _rewrite_vpc_scalar(val, ctx)
+                    if new is not None:
+                        node[key] = new
+                        continue
+                if skey in _SUBNET_SINGLE_KEYS and isinstance(val, str):
+                    new = _rewrite_subnet_scalar(val, ctx)
+                    if new is not None:
+                        node[key] = new
+                        continue
+                if skey in _SG_SINGLE_KEYS and isinstance(val, str):
+                    new = _rewrite_sg_scalar(val, ctx)
+                    if new is not None:
+                        node[key] = new
+                        continue
+                if skey in _SUBNET_LIST_KEYS:
+                    new_seq = _rewrite_subnet_list(val, ctx)
+                    if new_seq is not None:
+                        node[key] = new_seq
+                        continue
+                if skey in _SG_LIST_KEYS:
+                    new_seq = _rewrite_sg_list(val, ctx)
+                    if new_seq is not None:
+                        node[key] = new_seq
+                        continue
+                # Recurse into nested structures.
+                _process(val)
+        elif isinstance(node, (CommentedSeq, list)):
+            for item in node:
+                _process(item)
+
+    for _lid, resource in resources.items():
+        if not isinstance(resource, CommentedMap):
+            continue
+        props = resource.get("Properties")
+        if isinstance(props, CommentedMap):
+            _process(props)
+
+
+def add_vpc_resource_parameters(template: CommentedMap, ctx: _Context) -> None:
+    """Add TargetVpcId / TargetSubnetIds / TargetSecurityGroupIds parameters."""
+    params_needed = (
+        bool(ctx.vpc_ids) or bool(ctx.subnet_ids) or bool(ctx.security_group_ids)
+    )
+    if not params_needed:
+        return
+    params = _ensure_parameters(template)
+    if ctx.vpc_ids and "TargetVpcId" not in params:
+        params["TargetVpcId"] = CommentedMap(
+            [
+                ("Type", "AWS::EC2::VPC::Id"),
+                (
+                    "Description",
+                    f"Target-environment VPC ID (source refs: {', '.join(ctx.vpc_ids)})",
+                ),
+            ]
+        )
+    if ctx.subnet_ids and "TargetSubnetIds" not in params:
+        params["TargetSubnetIds"] = CommentedMap(
+            [
+                ("Type", "CommaDelimitedList"),
+                (
+                    "Description",
+                    "Comma-separated target-environment subnet IDs "
+                    f"(source refs: {', '.join(ctx.subnet_ids)})",
+                ),
+            ]
+        )
+    if ctx.security_group_ids and "TargetSecurityGroupIds" not in params:
+        params["TargetSecurityGroupIds"] = CommentedMap(
+            [
+                ("Type", "CommaDelimitedList"),
+                (
+                    "Description",
+                    "Comma-separated target-environment security group IDs "
+                    f"(source refs: {', '.join(ctx.security_group_ids)})",
+                ),
+            ]
+        )
+
+
 def scan_peering_resources(resources: CommentedMap, ctx: _Context) -> None:
     """R7 — record peering / TGW attachment resources for review."""
     if "peering" not in ctx.rules:
@@ -465,12 +705,16 @@ def rewrite_template(
             apply_deletion_policy(resources)
         apply_s3_bucket_name_rule(resources, ctx)
         scan_peering_resources(resources, ctx)
+        # R11 runs after R1-R10 so it only sees literals that earlier rules
+        # did not transform (e.g. peering VpcIds have already been flagged).
+        apply_vpc_resource_ids_rule(resources, ctx)
 
     # Add parameters for any captured rewrites.
     add_ami_parameter(template, ctx.ami_ids)
     add_kms_parameter(template, ctx.kms_arns)
     add_hosted_zone_parameter(template, ctx.hosted_zone_ids)
     add_bucket_prefix_parameter(template, ctx.s3_buckets)
+    add_vpc_resource_parameters(template, ctx)
 
     if review_decisions is not None:
         review_decisions.extend(ctx.review_decisions)

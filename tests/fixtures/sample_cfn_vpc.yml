@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Hotfix A Wave A1 fixture — VPC / Subnet / Security Group literal IDs.
+
+Resources:
+
+  MyappVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: myapp-vpc
+
+  MyappDbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Managed by myapp
+      SubnetIds:
+        - subnet-0abc111aaa2222aaa
+        - subnet-0def222bbb3333bbb
+
+  MyappSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: myapp application SG
+      VpcId: vpc-0abcdef1234567890
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  MyappInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0123456789abcdef0
+      InstanceType: t3.small
+      SubnetId: subnet-0abc111aaa2222aaa
+      SecurityGroupIds:
+        - sg-0aaa111222333aaaa
+        - sg-0bbb444555666bbbb
+
+  MyappLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: myapp-alb
+      Scheme: internal
+      Subnets:
+        - subnet-0abc111aaa2222aaa
+        - subnet-0def222bbb3333bbb
+      SecurityGroups:
+        - sg-0aaa111222333aaaa
