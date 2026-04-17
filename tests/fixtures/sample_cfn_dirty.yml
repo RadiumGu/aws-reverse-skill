@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: myapp production stack (former2 export — unclean)
+
+Resources:
+
+  MyappProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: myapp-processor
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role: arn:aws:iam::123456789012:role/myapp-lambda-role
+      Environment:
+        Variables:
+          REGION: ap-northeast-1
+          ACCOUNT_ID: '123456789012'
+          TABLE_NAME: myapp-items
+
+  MyappSchedulerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: myapp-scheduler
+      Runtime: python3.12
+      Handler: scheduler.lambda_handler
+      Role: arn:aws:iam::123456789012:role/myapp-lambda-role
+
+  MyappInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-0abcdef1234567890
+      AvailabilityZone: ap-northeast-1a
+      Tags:
+        - Key: Name
+          Value: myapp-server
+
+  MyappInstanceB:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.small
+      ImageId: ami-0abcdef1234567890
+      AvailabilityZone: ap-northeast-1b
+
+  MyappDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: myapp-data-bucket-prod
+
+  MyappLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: logs-bucket-ap-northeast-1
+
+  MyappDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: myapp-db-prod
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: '8.0'
+      MasterUsername: admin
+      AllocatedStorage: 20
+      AvailabilityZone: ap-northeast-1c
+
+  MyappItemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: myapp-items
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  MyappLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: myapp-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: myapp-lambda-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: arn:aws:dynamodb:ap-northeast-1:123456789012:table/myapp-items

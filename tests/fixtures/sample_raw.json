@@ -1,0 +1,72 @@
+{
+  "resources": [
+    {
+      "Type": "AWS::Lambda::Function",
+      "PhysicalId": "myapp-processor",
+      "Tags": {"Environment": "prod", "Team": "backend", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::Lambda::Function",
+      "PhysicalId": "myapp-scheduler",
+      "Tags": {"Environment": "prod", "Team": "backend", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::Lambda::Function",
+      "PhysicalId": "test-function",
+      "Tags": {"Environment": "dev"}
+    },
+    {
+      "Type": "AWS::IAM::Role",
+      "PhysicalId": "myapp-lambda-role",
+      "Tags": {"Environment": "prod", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::IAM::Role",
+      "PhysicalId": "default-ssm-role",
+      "Tags": {}
+    },
+    {
+      "Type": "AWS::S3::Bucket",
+      "PhysicalId": "myapp-data-bucket-prod",
+      "Tags": {"Environment": "prod", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::S3::Bucket",
+      "PhysicalId": "logs-bucket",
+      "Tags": {"Environment": "prod"}
+    },
+    {
+      "Type": "AWS::RDS::DBInstance",
+      "PhysicalId": "myapp-db-prod",
+      "Tags": {"Environment": "prod", "Project": "myapp"}
+    },
+    {
+      "Type": "AWS::EC2::VPC",
+      "PhysicalId": "vpc-default0001",
+      "Tags": {"Name": "default"},
+      "IsDefault": true
+    },
+    {
+      "Type": "AWS::EC2::SecurityGroup",
+      "PhysicalId": "sg-default0001",
+      "GroupName": "default",
+      "Tags": {}
+    },
+    {
+      "Type": "AWS::EC2::NetworkAcl",
+      "PhysicalId": "acl-default0001",
+      "Tags": {},
+      "IsDefault": true
+    },
+    {
+      "Type": "AWS::DynamoDB::Table",
+      "PhysicalId": "other-team-table",
+      "Tags": {"Environment": "prod", "Team": "ops"}
+    },
+    {
+      "Type": "AWS::SNS::Topic",
+      "PhysicalId": "myapp-alerts",
+      "Tags": {"Environment": "prod", "Project": "myapp"}
+    }
+  ]
+}

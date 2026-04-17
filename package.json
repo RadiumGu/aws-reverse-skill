@@ -1,0 +1,15 @@
+{
+  "name": "aws-reverse-skill",
+  "version": "1.0.0",
+  "description": "AgentSkill: reverse-engineer existing AWS environments into deployable CloudFormation templates",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "former2": "^0.14.0"
+  },
+  "scripts": {
+    "scan": "node scripts/scan.js"
+  }
+}

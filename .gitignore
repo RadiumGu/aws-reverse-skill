@@ -1,0 +1,13 @@
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+out/
+*.log
+raw.json
+cfn-full.yml
+cfn-filtered.yml
+cleaned.yml
+filtered.json
+.env

@@ -1,0 +1,13 @@
+{
+  "_comment": "Default filter presets for select.py. Override via CLI flags.",
+  "exclude_default": true,
+  "exclude_services": ["CloudFormation", "CloudTrail"],
+  "common_service_sets": {
+    "compute": ["Lambda", "EC2", "ECS", "EKS"],
+    "storage": ["S3", "EFS", "FSx"],
+    "database": ["RDS", "DynamoDB", "ElastiCache", "Neptune"],
+    "network": ["EC2", "Route53", "CloudFront", "APIGateway"],
+    "iam": ["IAM"],
+    "app": ["Lambda", "IAM", "S3", "DynamoDB", "SNS", "SQS", "StepFunctions"]
+  }
+}
