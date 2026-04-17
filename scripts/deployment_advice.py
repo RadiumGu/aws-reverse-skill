@@ -16,9 +16,13 @@ import argparse
 import ipaddress
 import json
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+sys.path.insert(0, str(Path(__file__).parent))
+from arn_rewriter import find_arns  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +58,7 @@ LAYER_LABEL = {
     "container": "容器与编排",
     "observability": "可观测性",
     "integration": "集成与事件",
+    "cross-account": "🔗 跨账号集成梳理",
 }
 
 
@@ -561,6 +566,192 @@ def rule_prefix_list(resources: list[dict[str, Any]]) -> list[Advice]:
     ]
 
 
+def _get_props(resource: dict[str, Any]) -> dict[str, Any]:
+    """Return the Properties dict for a raw-scan resource, tolerating flat layouts."""
+    props = resource.get("Properties")
+    if isinstance(props, dict):
+        return props
+    return resource
+
+
+def _collect_cross_account_arns(
+    text_values: list[str], source_account: str
+) -> list[dict[str, Any]]:
+    """Scan *text_values* and return records for ARNs outside *source_account*."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in text_values:
+        if not isinstance(value, str):
+            continue
+        for match in find_arns(value):
+            if not match.get("is_known_service"):
+                continue
+            account = match.get("account") or ""
+            if not account or account == source_account:
+                continue
+            arn = match["arn"]
+            if arn in seen:
+                continue
+            seen.add(arn)
+            out.append({
+                "arn": arn,
+                "service": match.get("service", ""),
+                "account": account,
+            })
+    return out
+
+
+def _extract_stepfn_definition_strings(
+    resource: dict[str, Any],
+) -> list[str]:
+    """Return candidate definition strings for a Step Functions state machine."""
+    props = _get_props(resource)
+    values: list[str] = []
+    for key in ("DefinitionString", "Definition"):
+        val = props.get(key)
+        if isinstance(val, str):
+            values.append(val)
+        elif isinstance(val, dict):
+            values.append(json.dumps(val))
+    return values
+
+
+def _extract_lambda_env_values(resource: dict[str, Any]) -> list[str]:
+    """Return every Environment.Variables.* string value for a Lambda function."""
+    props = _get_props(resource)
+    env = props.get("Environment") or {}
+    if not isinstance(env, dict):
+        return []
+    variables = env.get("Variables")
+    if not isinstance(variables, dict):
+        return []
+    return [v for v in variables.values() if isinstance(v, str)]
+
+
+def rule_cross_account_step_functions(
+    resources: list[dict[str, Any]], source_account: str = ""
+) -> list[Advice]:
+    """Emit advice when Step Functions reference Lambda/SQS from other accounts."""
+    if not source_account:
+        return []
+    machines = _of_type(resources, "AWS::StepFunctions::StateMachine")
+    if not machines:
+        return []
+
+    hits: list[dict[str, Any]] = []
+    for sm in machines:
+        defs = _extract_stepfn_definition_strings(sm)
+        arns = _collect_cross_account_arns(defs, source_account)
+        if not arns:
+            continue
+        sm_id = sm.get("PhysicalId") or sm.get("LogicalId") or "unknown-state-machine"
+        for record in arns:
+            hits.append({**record, "state_machine": str(sm_id)})
+
+    if not hits:
+        return []
+
+    accounts = sorted({h["account"] for h in hits})
+    detail_lines = [
+        (
+            f"State machines reference Lambda/SQS/etc. from "
+            f"{len(accounts)} external account(s): {', '.join(accounts)}. "
+            "Verify target-account resource policies before deploying."
+        )
+    ]
+    service_counter = Counter(h["service"] for h in hits)
+    for service, count in sorted(service_counter.items()):
+        detail_lines.append(f"- {service}: {count} ARN(s)")
+    for h in hits[:5]:
+        detail_lines.append(
+            f"- {h['service']}: `{h['arn']}` (from {h['state_machine']})"
+        )
+    if len(hits) > 5:
+        detail_lines.append(f"- ... {len(hits) - 5} more")
+
+    return [
+        Advice(
+            layer="cross-account",
+            priority="yellow",
+            resource_type="AWS::StepFunctions::StateMachine",
+            title=f"Step Functions 跨账号引用 ({len(hits)} 个)",
+            detail="\n".join(detail_lines),
+            options=[
+                "⭐ 在目标账号为每个被调用资源授予 invoke/send 权限",
+                "使用 shared-services account 集中托管跨账号 Lambda",
+                "改走 EventBridge + cross-account bus（解耦）",
+            ],
+            commands=[
+                "aws lambda add-permission --function-name <name> "
+                "--statement-id states-cross-account --action lambda:InvokeFunction "
+                "--principal states.amazonaws.com --source-account <src-acct>",
+                "aws sqs add-permission --queue-url <url> --label states-cross-account "
+                "--aws-account-ids <src-acct> --actions SendMessage",
+            ],
+            resources=sorted({h["arn"] for h in hits}),
+        )
+    ]
+
+
+def rule_cross_account_lambda_env(
+    resources: list[dict[str, Any]], source_account: str = ""
+) -> list[Advice]:
+    """Emit advice when Lambda Environment.Variables carry cross-account ARNs."""
+    if not source_account:
+        return []
+    funcs = _of_type(resources, "AWS::Lambda::Function")
+    if not funcs:
+        return []
+
+    hits: list[dict[str, Any]] = []
+    for fn in funcs:
+        values = _extract_lambda_env_values(fn)
+        arns = _collect_cross_account_arns(values, source_account)
+        if not arns:
+            continue
+        fn_id = fn.get("PhysicalId") or fn.get("LogicalId") or "unknown-function"
+        for record in arns:
+            hits.append({**record, "function": str(fn_id)})
+
+    if not hits:
+        return []
+
+    accounts = sorted({h["account"] for h in hits})
+    detail_lines = [
+        (
+            f"Lambda Environment.Variables carry ARNs owned by "
+            f"{len(accounts)} external account(s): {', '.join(accounts)}. "
+            "Supply the target-environment equivalents before deploy."
+        )
+    ]
+    for h in hits[:5]:
+        detail_lines.append(
+            f"- {h['service']}: `{h['arn']}` (from {h['function']})"
+        )
+    if len(hits) > 5:
+        detail_lines.append(f"- ... {len(hits) - 5} more")
+
+    return [
+        Advice(
+            layer="cross-account",
+            priority="yellow",
+            resource_type="AWS::Lambda::Function",
+            title=f"Lambda Env cross-account ARN ({len(hits)} 个)",
+            detail="\n".join(detail_lines),
+            options=[
+                "⭐ 在目标账号提供同名替代资源，走 Parameter 填值",
+                "改用 Secrets Manager / SSM Parameter 中心化下发",
+                "保留并请求目标账号授予跨账号访问权限（最后手段）",
+            ],
+            commands=[
+                "aws lambda update-function-configuration --function-name <name> "
+                "--environment 'Variables={KEY=<target-arn>}'",
+            ],
+            resources=sorted({h["arn"] for h in hits}),
+        )
+    ]
+
+
 ALL_RULES: list[RuleFn] = [
     rule_rds,
     rule_dynamodb,
@@ -582,11 +773,31 @@ ALL_RULES: list[RuleFn] = [
 ]
 
 
-def generate_advice(resources: list[dict[str, Any]]) -> list[Advice]:
-    """Run all rules and return the collected :class:`Advice` list."""
+def _integration_cross_account_rules(
+    resources: list[dict[str, Any]], source_account: str
+) -> list[Advice]:
+    """Run the source-account-aware cross-account ARN rules."""
+    return [
+        *rule_cross_account_step_functions(resources, source_account),
+        *rule_cross_account_lambda_env(resources, source_account),
+    ]
+
+
+def generate_advice(
+    resources: list[dict[str, Any]], source_account: str = ""
+) -> list[Advice]:
+    """Run all rules and return the collected :class:`Advice` list.
+
+    When *source_account* is supplied, the cross-account ARN rules
+    (Step Functions Definition + Lambda Env) also run and contribute to the
+    integration layer. Omitted for backward compatibility with callers that
+    cannot determine the source account.
+    """
     out: list[Advice] = []
     for rule in ALL_RULES:
         out.extend(rule(resources))
+    if source_account:
+        out.extend(_integration_cross_account_rules(resources, source_account))
     return out
 
 
@@ -685,6 +896,14 @@ def main() -> None:
         default="md",
     )
     parser.add_argument("--stack-name", default="")
+    parser.add_argument(
+        "--source-account",
+        default="",
+        help=(
+            "Optional 12-digit source account. Enables cross-account-ARN "
+            "advice for Step Functions Definition + Lambda Env."
+        ),
+    )
     args = parser.parse_args()
 
     path = Path(args.input)
@@ -694,7 +913,7 @@ def main() -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     resources = data.get("resources", []) if isinstance(data, dict) else data
 
-    advice = generate_advice(resources)
+    advice = generate_advice(resources, source_account=args.source_account)
 
     if args.format == "md":
         text = render_markdown(advice, args.stack_name)

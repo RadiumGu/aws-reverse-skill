@@ -1,0 +1,30 @@
+{
+  "resources": [
+    {
+      "Type": "AWS::StepFunctions::StateMachine",
+      "PhysicalId": "myapp-cross-account-sm",
+      "Region": "ap-northeast-1",
+      "Properties": {
+        "StateMachineName": "myapp-cross-account-sm",
+        "DefinitionString": "{\"StartAt\":\"Local\",\"States\":{\"Local\":{\"Type\":\"Task\",\"Resource\":\"arn:aws:lambda:ap-northeast-1:111111111111:function:local-task\",\"Next\":\"External\"},\"External\":{\"Type\":\"Task\",\"Resource\":\"arn:aws:lambda:us-east-1:999999999999:function:external-task\",\"End\":true}}}"
+      },
+      "Tags": {"Project": "myapp"}
+    },
+    {
+      "Type": "AWS::Lambda::Function",
+      "PhysicalId": "myapp-function",
+      "Region": "ap-northeast-1",
+      "Properties": {
+        "FunctionName": "myapp-function",
+        "Runtime": "python3.12",
+        "Environment": {
+          "Variables": {
+            "DB_TABLE_ARN": "arn:aws:dynamodb:ap-northeast-1:111111111111:table/foo",
+            "PARTNER_QUEUE_ARN": "arn:aws:sqs:us-east-1:999999999999:partner-queue"
+          }
+        }
+      },
+      "Tags": {"Project": "myapp"}
+    }
+  ]
+}
