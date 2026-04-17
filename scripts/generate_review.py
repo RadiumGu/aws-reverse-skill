@@ -276,6 +276,7 @@ def _decision_kind(d: dict[str, Any]) -> str:
         ("D.sg-cidr-rfc1918", "sg-cidr-rfc1918"),
         ("D.sg-cidr-public-check", "sg-cidr-public-check"),
         ("D.sg-cidr-aws-range", "sg-cidr-aws-range"),
+        ("D.cross-account-arn", "cross-account-arn"),
         ("D.peering", "peering"),
         ("D.data-migration", "data-migration"),
         ("D.iam-trust", "iam-trust"),
@@ -309,6 +310,34 @@ def _build_vpc_resource_mapping_section(
         hint = d.get("suggested_action") or d.get("detail", "")
         if hint:
             lines.append(f"- `{d.get('parameter_name', d.get('resource', '?'))}`: {hint}")
+    lines.append("")
+    return lines
+
+
+def _build_cross_account_arn_section(
+    decisions: list[dict[str, Any]],
+) -> list[str]:
+    """Render the 🔗 cross-account ARN table emitted by R13/R14."""
+    if not decisions:
+        return []
+    lines = ["### 🔗 跨账号 ARN 引用 (R13/R14)", ""]
+    lines.append("| Parameter Name | Service | Source ARN | Location | Target Value |")
+    lines.append("|----------------|---------|------------|----------|--------------|")
+    for d in decisions:
+        param = d.get("parameter_name") or d.get("resource") or "?"
+        service = d.get("service", "?")
+        arn = d.get("arn", "?")
+        location = d.get("location", "?")
+        lines.append(
+            f"| {param} | {service} | `{arn}` | `{location}` | **<请填>** |"
+        )
+    lines.append("")
+    for d in decisions:
+        hint = d.get("suggested_action") or d.get("detail", "")
+        if hint:
+            lines.append(
+                f"- `{d.get('parameter_name', d.get('resource', '?'))}`: {hint}"
+            )
     lines.append("")
     return lines
 
@@ -367,6 +396,7 @@ def build_decisions_section(decisions: list[dict[str, Any]]) -> str:
 
     vpc_mapping: list[dict[str, Any]] = []
     sg_cidr: list[dict[str, Any]] = []
+    cross_account_arn: list[dict[str, Any]] = []
     legacy: list[dict[str, Any]] = []
     for d in decisions:
         kind = _decision_kind(d)
@@ -374,12 +404,15 @@ def build_decisions_section(decisions: list[dict[str, Any]]) -> str:
             vpc_mapping.append(d)
         elif kind.startswith("sg-cidr"):
             sg_cidr.append(d)
+        elif kind == "cross-account-arn":
+            cross_account_arn.append(d)
         else:
             legacy.append(d)
 
     lines = ["## ⚠️ 需人工决策（skill 无法自动处理）", ""]
     lines.extend(_build_vpc_resource_mapping_section(vpc_mapping))
     lines.extend(_build_sg_cidr_section(sg_cidr))
+    lines.extend(_build_cross_account_arn_section(cross_account_arn))
     for d in legacy:
         lines.extend(_build_generic_decision_block(d))
     return "\n".join(lines)

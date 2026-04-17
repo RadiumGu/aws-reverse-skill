@@ -55,6 +55,11 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq, TaggedScalar
 
 sys.path.insert(0, str(Path(__file__).parent))
 from cidr_analyzer import classify_cidr  # noqa: E402
+from arn_rewriter import (  # noqa: E402
+    find_arns,
+    rewrite_arn,
+    rewrite_arns_in_text,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +72,9 @@ PHASE1_RULES: frozenset[str] = frozenset(
 PHASE2_RULES: frozenset[str] = frozenset(
     {"kms", "peering", "route53", "iam_principal", "s3_bucket_name"}
 )
-PHASE3_RULES: frozenset[str] = frozenset({"vpc_resource_ids", "sg_cidr"})
+PHASE3_RULES: frozenset[str] = frozenset(
+    {"vpc_resource_ids", "sg_cidr", "nested_arn_string", "nested_arn_json"}
+)
 # Historical ALL_RULES = Phase 1 + 2 (kept for backward compatibility with
 # existing test expectations). Use ALL_RULES_EXTENDED for callers that want
 # every shipped rule including Phase 3+.
@@ -262,6 +269,10 @@ class _Context:
         self.sg_vpc_cidr_used: bool = False
         #: R12 — warnings raised when the rule is a no-op (e.g. missing CIDRs).
         self.sg_cidr_warnings: list[str] = []
+        #: R13/R14 — external-account parameter specs keyed by parameter name.
+        self.external_arn_parameters: dict[str, dict[str, str]] = {}
+        #: R13/R14 — warnings for skipped JSON blobs, CFN intrinsics, etc.
+        self.nested_arn_warnings: list[str] = []
         self.review_decisions: list[dict[str, Any]] = []
 
 
@@ -924,6 +935,415 @@ def scan_peering_resources(resources: CommentedMap, ctx: _Context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# R13 / R14 — nested ARN rewriting
+# ---------------------------------------------------------------------------
+
+
+#: Dict keys that hold a single ARN-bearing scalar string we want R13 to scan.
+#: Generic string scalars are *not* scanned to avoid rewriting arbitrary values;
+#: however, every non-empty string descendant is scanned for embedded ARNs in
+#: the passing walk below. The key set here is used only to annotate the
+#: emitted review decisions with the property path.
+_R13_ARN_STRING_KEYS: frozenset[str] = frozenset(
+    {
+        "Arn",
+        "RoleArn",
+        "TargetArn",
+        "DestinationArn",
+        "EventSourceArn",
+        "FunctionArn",
+        "QueueArn",
+        "TopicArn",
+        "Uri",
+        "AuthorizerUri",
+        "StateMachineArn",
+        "DefinitionS3Location",
+        "Input",
+        "InputTransformer",
+    }
+)
+
+#: Policy-document-bearing dict keys (R14).
+_R14_POLICY_DOC_KEYS: frozenset[str] = frozenset(
+    {
+        "PolicyDocument",
+        "AssumeRolePolicyDocument",
+    }
+)
+
+#: StepFunctions DefinitionString — the JSON-string variant handled by R14.
+_R14_JSON_STRING_KEYS: frozenset[str] = frozenset({"DefinitionString"})
+
+
+def _record_cross_account_decision(
+    ctx: _Context,
+    arn: str,
+    parameter_name: str,
+    service: str,
+    location: str,
+) -> None:
+    """Emit a D.cross-account-arn review decision for R13/R14."""
+    decision_id = f"D.cross-account-arn.{parameter_name}.{location}"
+    _record_review(
+        ctx,
+        {
+            "id": decision_id,
+            "kind": "cross-account-arn",
+            "category": "cross-account-arn",
+            "resource": parameter_name,
+            "parameter_name": parameter_name,
+            "arn": arn,
+            "service": service,
+            "location": location,
+            "suggested_action": (
+                f"Supply the target-environment ARN that replaces {arn}."
+            ),
+            "detail": (
+                f"Cross-account ARN {arn} referenced from {location} surfaced "
+                f"as Parameter {parameter_name}."
+            ),
+        },
+    )
+
+
+def _ingest_rewrite_result(
+    ctx: _Context,
+    result: dict[str, Any],
+    location: str,
+) -> None:
+    """Merge a rewrite_arns_in_text() result into *ctx* state + review decisions."""
+    for param_name, spec in result.get("parameters_needed", {}).items():
+        if param_name not in ctx.external_arn_parameters:
+            ctx.external_arn_parameters[param_name] = dict(spec)
+    for record in result.get("rewrites", []):
+        if record.get("action") == "parameter" and record.get("parameter_name"):
+            parsed = _parse_service_from_arn(record.get("original", ""))
+            _record_cross_account_decision(
+                ctx,
+                arn=record["original"],
+                parameter_name=record["parameter_name"],
+                service=parsed,
+                location=location,
+            )
+
+
+def _parse_service_from_arn(arn: str) -> str:
+    """Return the ``service`` segment of *arn* (best-effort)."""
+    parts = arn.split(":", 5)
+    if len(parts) >= 3:
+        return parts[2]
+    return "unknown"
+
+
+def _text_to_yaml_scalar(text: str) -> Any:
+    """Turn a rewritten text back into a CFN scalar.
+
+    If the text contains ``${...}`` placeholders (AWS pseudo params or
+    Parameter refs), wrap it in ``!Sub``. Otherwise return the plain string.
+    """
+    if "${" in text:
+        return TaggedScalar(value=text, tag="!Sub")
+    return text
+
+
+def _apply_r13_to_scalar(
+    ctx: _Context,
+    value: str,
+    location: str,
+) -> Any:
+    """Run rewrite_arns_in_text on *value* and build the replacement node."""
+    result = rewrite_arns_in_text(
+        value,
+        source_account=ctx.account_id,
+        source_region=ctx.source_region,
+    )
+    rewrites = result.get("rewrites", [])
+    if not rewrites:
+        return None
+    # Only replace when at least one rewrite mutated the string.
+    changed = any(r.get("action") != "unchanged" for r in rewrites)
+    if not changed:
+        return None
+    _ingest_rewrite_result(ctx, result, location)
+    return _text_to_yaml_scalar(result["new_text"])
+
+
+def _walk_r13(node: Any, ctx: _Context, path: str) -> Any:
+    """Recursively scan *node*; replace ARN-bearing string scalars in place."""
+    if isinstance(node, TaggedScalar):
+        # If earlier rules (R1, R2) wrapped a scalar in !Sub, its inner string
+        # may still contain untouched ARN literals — re-scan those. Other
+        # intrinsics (!Ref / !Join / !GetAtt) are left alone.
+        tag = getattr(node, "tag", None)
+        tag_value = getattr(tag, "value", str(tag)) if tag is not None else ""
+        inner = getattr(node, "value", None)
+        if tag_value == "!Sub" and isinstance(inner, str) and "arn:aws" in inner:
+            result = rewrite_arns_in_text(
+                inner,
+                source_account=ctx.account_id,
+                source_region=ctx.source_region,
+            )
+            rewrites = result.get("rewrites", [])
+            if rewrites and any(r.get("action") != "unchanged" for r in rewrites):
+                _ingest_rewrite_result(ctx, result, path)
+                node.value = result["new_text"]
+        return node
+    if isinstance(node, str):
+        if not node or "arn:aws" not in node:
+            return node
+        replacement = _apply_r13_to_scalar(ctx, node, path)
+        if replacement is not None:
+            return replacement
+        return node
+    if isinstance(node, CommentedMap):
+        for key in list(node.keys()):
+            child_path = f"{path}.{key}" if path else str(key)
+            node[key] = _walk_r13(node[key], ctx, child_path)
+        return node
+    if isinstance(node, (CommentedSeq, list)):
+        for i, item in enumerate(node):
+            child_path = f"{path}[{i}]"
+            node[i] = _walk_r13(item, ctx, child_path)
+        return node
+    return node
+
+
+def apply_nested_arn_string_rule(
+    resources: CommentedMap, ctx: _Context
+) -> None:
+    """R13 — recursively scan every string scalar for embedded ARNs.
+
+    Walks the entire Resources tree. Any scalar string containing a recognised
+    ARN is rewritten (via :func:`arn_rewriter.rewrite_arns_in_text`). When the
+    rewritten text contains CFN intrinsic placeholders, the scalar is re-wrapped
+    as a ``!Sub`` TaggedScalar. CFN-intrinsic TaggedScalars (e.g. already a
+    ``!Sub`` / ``!Join``) are left untouched — their inner strings are not
+    re-scanned to avoid double-rewriting.
+    """
+    if "nested_arn_string" not in ctx.rules:
+        return
+    if not isinstance(resources, CommentedMap):
+        return
+    for logical_id, resource in resources.items():
+        if not isinstance(resource, CommentedMap):
+            continue
+        props = resource.get("Properties")
+        if not isinstance(props, CommentedMap):
+            continue
+        path = f"Resources.{logical_id}.Properties"
+        resource["Properties"] = _walk_r13(props, ctx, path)
+
+
+def _walk_json_for_arns(
+    node: Any,
+    ctx: _Context,
+    location: str,
+) -> Any:
+    """Walk a plain Python JSON structure and rewrite ARN strings in place."""
+    if isinstance(node, dict):
+        new: dict[str, Any] = {}
+        for k, v in node.items():
+            new[k] = _walk_json_for_arns(v, ctx, f"{location}.{k}")
+        return new
+    if isinstance(node, list):
+        return [_walk_json_for_arns(v, ctx, f"{location}[{i}]") for i, v in enumerate(node)]
+    if isinstance(node, str) and "arn:aws" in node:
+        result = rewrite_arns_in_text(
+            node,
+            source_account=ctx.account_id,
+            source_region=ctx.source_region,
+        )
+        rewrites = result.get("rewrites", [])
+        if rewrites and any(r.get("action") != "unchanged" for r in rewrites):
+            _ingest_rewrite_result(ctx, result, location)
+            return result["new_text"]
+        return node
+    return node
+
+
+def _rewrite_step_functions_definition_string(
+    ctx: _Context,
+    props: CommentedMap,
+    logical_id: str,
+) -> None:
+    """R14 — handle StepFunctions StateMachine.DefinitionString (JSON string)."""
+    if not isinstance(props, CommentedMap):
+        return
+    defn = props.get("DefinitionString")
+    if defn is None:
+        return
+    location = f"Resources.{logical_id}.Properties.DefinitionString"
+    wrapped_sub = False
+    raw_text: str | None = None
+    if isinstance(defn, TaggedScalar):
+        tag = getattr(defn, "tag", None)
+        tag_value = getattr(tag, "value", str(tag)) if tag is not None else ""
+        if tag_value == "!Sub" and isinstance(defn.value, str):
+            raw_text = defn.value
+            wrapped_sub = True
+        else:
+            ctx.nested_arn_warnings.append(
+                f"R14: {location} is a CFN intrinsic ({tag_value}) — skipped."
+            )
+            return
+    elif isinstance(defn, str):
+        raw_text = defn
+    else:
+        return
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        ctx.nested_arn_warnings.append(
+            f"R14: {location} is not valid JSON ({exc}) — skipped."
+        )
+        return
+    rewritten = _walk_json_for_arns(parsed, ctx, location)
+    new_text = json.dumps(rewritten)
+    # If the rewritten JSON introduced CFN placeholders, wrap in !Sub so that
+    # CloudFormation resolves them at deploy time.
+    if "${" in new_text or wrapped_sub:
+        props["DefinitionString"] = TaggedScalar(value=new_text, tag="!Sub")
+    else:
+        props["DefinitionString"] = new_text
+
+
+def _rewrite_policy_document(
+    ctx: _Context,
+    props: CommentedMap,
+    logical_id: str,
+    key: str,
+) -> None:
+    """R14 — rewrite a dict-form PolicyDocument / AssumeRolePolicyDocument."""
+    if not isinstance(props, CommentedMap):
+        return
+    doc = props.get(key)
+    if doc is None:
+        return
+    location = f"Resources.{logical_id}.Properties.{key}"
+    if isinstance(doc, TaggedScalar):
+        ctx.nested_arn_warnings.append(
+            f"R14: {location} is a CFN intrinsic ({doc.tag}) — skipped."
+        )
+        return
+    if isinstance(doc, str):
+        # Occasionally a PolicyDocument is a JSON string literal.
+        try:
+            parsed = json.loads(doc)
+        except json.JSONDecodeError as exc:
+            ctx.nested_arn_warnings.append(
+                f"R14: {location} string is not valid JSON ({exc}) — skipped."
+            )
+            return
+        rewritten = _walk_json_for_arns(parsed, ctx, location)
+        new_text = json.dumps(rewritten)
+        if "${" in new_text:
+            props[key] = TaggedScalar(value=new_text, tag="!Sub")
+        else:
+            props[key] = new_text
+        return
+    if not isinstance(doc, CommentedMap):
+        return
+
+    # Walk the dict structure; we only need to replace string leaves under
+    # Statement.Resource / NotResource / Principal.AWS.
+    def _walk_dict(node: Any, path: str) -> Any:
+        if isinstance(node, TaggedScalar):
+            return node
+        if isinstance(node, str):
+            if "arn:aws" not in node:
+                return node
+            result = rewrite_arns_in_text(
+                node,
+                source_account=ctx.account_id,
+                source_region=ctx.source_region,
+            )
+            rewrites = result.get("rewrites", [])
+            if rewrites and any(r.get("action") != "unchanged" for r in rewrites):
+                _ingest_rewrite_result(ctx, result, path)
+                return _text_to_yaml_scalar(result["new_text"])
+            return node
+        if isinstance(node, CommentedMap):
+            for k in list(node.keys()):
+                node[k] = _walk_dict(node[k], f"{path}.{k}")
+            return node
+        if isinstance(node, dict):
+            for k in list(node.keys()):
+                node[k] = _walk_dict(node[k], f"{path}.{k}")
+            return node
+        if isinstance(node, (CommentedSeq, list)):
+            for i, item in enumerate(node):
+                node[i] = _walk_dict(item, f"{path}[{i}]")
+            return node
+        return node
+
+    _walk_dict(doc, location)
+
+
+_R14_STEP_FUNCTIONS_TYPES: frozenset[str] = frozenset(
+    {"AWS::StepFunctions::StateMachine"}
+)
+_R14_POLICY_TYPES: frozenset[str] = frozenset(
+    {
+        "AWS::IAM::Role",
+        "AWS::IAM::Policy",
+        "AWS::IAM::ManagedPolicy",
+        "AWS::S3::BucketPolicy",
+        "AWS::SNS::TopicPolicy",
+        "AWS::SQS::QueuePolicy",
+        "AWS::KMS::Key",
+    }
+)
+
+
+def apply_nested_arn_json_rule(
+    resources: CommentedMap, ctx: _Context
+) -> None:
+    """R14 — rewrite ARNs embedded in JSON-bearing CFN properties."""
+    if "nested_arn_json" not in ctx.rules:
+        return
+    if not isinstance(resources, CommentedMap):
+        return
+    for logical_id, resource in resources.items():
+        if not isinstance(resource, CommentedMap):
+            continue
+        rtype = resource.get("Type")
+        props = resource.get("Properties")
+        if not isinstance(props, CommentedMap):
+            continue
+        if rtype in _R14_STEP_FUNCTIONS_TYPES:
+            _rewrite_step_functions_definition_string(ctx, props, str(logical_id))
+        if rtype in _R14_POLICY_TYPES:
+            for key in ("PolicyDocument", "AssumeRolePolicyDocument"):
+                if key in props:
+                    _rewrite_policy_document(ctx, props, str(logical_id), key)
+
+
+def add_external_arn_parameters(template: CommentedMap, ctx: _Context) -> None:
+    """Add a String Parameter for every external-account ARN captured by R13/R14."""
+    if not ctx.external_arn_parameters:
+        return
+    params = _ensure_parameters(template)
+    for name in sorted(ctx.external_arn_parameters):
+        if name in params:
+            continue
+        spec = ctx.external_arn_parameters[name]
+        params[name] = CommentedMap(
+            [
+                ("Type", "String"),
+                (
+                    "Description",
+                    spec.get("description", f"External ARN placeholder ({name})."),
+                ),
+            ]
+        )
+        example = spec.get("example_arn")
+        if example:
+            params[name]["Description"] = (
+                f"{params[name]['Description']} Example source ARN: {example}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -972,6 +1392,10 @@ def rewrite_template(
         # R12 — SG CIDR classification. Runs after R11 so peering VpcIds have
         # already been flagged.
         apply_sg_cidr_rule(resources, ctx)
+        # R13 — recursive ARN scan over every string scalar.
+        apply_nested_arn_string_rule(resources, ctx)
+        # R14 — JSON-embedded ARN scan (Step Functions / IAM policies).
+        apply_nested_arn_json_rule(resources, ctx)
 
     # Add parameters for any captured rewrites.
     add_ami_parameter(template, ctx.ami_ids)
@@ -980,6 +1404,7 @@ def rewrite_template(
     add_bucket_prefix_parameter(template, ctx.s3_buckets)
     add_vpc_resource_parameters(template, ctx)
     add_sg_cidr_parameter(template, ctx)
+    add_external_arn_parameters(template, ctx)
     # Emit vpc-resource-mapping decisions after all R11 state has settled.
     if "vpc_resource_ids" in active_rules:
         _emit_vpc_resource_mapping_decisions(ctx)
