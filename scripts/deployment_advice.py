@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).parent))
 from arn_rewriter import find_arns  # noqa: E402
+from region_lock import find_region_locked  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,7 @@ LAYER_LABEL = {
     "observability": "可观测性",
     "integration": "集成与事件",
     "cross-account": "🔗 跨账号集成梳理",
+    "region-lock": "🌐 Region 约束 (Hotfix C)",
 }
 
 
@@ -752,6 +754,131 @@ def rule_cross_account_lambda_env(
     ]
 
 
+_REGION_LOCK_HINTS: dict[str, dict[str, Any]] = {
+    "AWS::CloudFront::Distribution": {
+        "summary": (
+            "Deploy ACM cert + WAFv2 to us-east-1 stack first, then reference "
+            "the ARN from the CloudFront Distribution."
+        ),
+        "commands": [
+            "aws acm request-certificate --region us-east-1 "
+            "--domain-name <domain> --validation-method DNS",
+            "aws wafv2 create-web-acl --region us-east-1 --scope CLOUDFRONT "
+            "--name <name> --default-action Allow={} --visibility-config <...>",
+        ],
+    },
+    "AWS::WAFv2::WebACL": {
+        "summary": (
+            "Create in us-east-1; use nested stacks or a separate template so "
+            "the CLOUDFRONT-scoped WebACL lives in the correct region."
+        ),
+        "commands": [
+            "aws wafv2 create-web-acl --region us-east-1 --scope CLOUDFRONT "
+            "--name <name> --default-action Allow={} --visibility-config <...>",
+        ],
+    },
+    "AWS::CertificateManager::Certificate": {
+        "summary": (
+            "Must be us-east-1 when the certificate is consumed by a "
+            "CloudFront Distribution."
+        ),
+        "commands": [
+            "aws acm request-certificate --region us-east-1 "
+            "--domain-name <domain> --validation-method DNS",
+        ],
+    },
+    "AWS::Lambda::Function": {
+        "summary": (
+            "Must be us-east-1; Lambda@Edge function code is deployed in "
+            "us-east-1 only and replicated automatically."
+        ),
+        "commands": [
+            "aws lambda create-function --region us-east-1 "
+            "--function-name <name> --runtime nodejs20.x --role <role-arn> "
+            "--handler index.handler --zip-file fileb://code.zip",
+            "aws lambda publish-version --region us-east-1 --function-name <name>",
+        ],
+    },
+}
+
+
+def rule_region_lock(
+    resources: list[dict[str, Any]],
+    target_region: str = "",
+) -> list[Advice]:
+    """Emit advice when CFN resources are locked to us-east-1.
+
+    Takes a *list of raw resources* (former2 format) — we reconstruct a minimal
+    CFN ``Resources`` dict so ``find_region_locked`` can classify each entry.
+    """
+    if not target_region or target_region == "us-east-1":
+        return []
+    if not resources:
+        return []
+
+    fake_template: dict[str, Any] = {"Resources": {}}
+    # Each raw entry becomes a synthetic Resources entry keyed by PhysicalId
+    # (falling back to Type+index) so find_region_locked can inspect it.
+    for idx, entry in enumerate(resources):
+        if not isinstance(entry, dict):
+            continue
+        rtype = entry.get("Type")
+        if not rtype:
+            continue
+        logical = (
+            entry.get("LogicalId")
+            or entry.get("PhysicalId")
+            or f"{rtype.split('::')[-1]}{idx}"
+        )
+        props = entry.get("Properties") if isinstance(entry.get("Properties"), dict) else entry
+        fake_template["Resources"][str(logical)] = {
+            "Type": rtype,
+            "Properties": props,
+        }
+
+    flagged = find_region_locked(fake_template, target_region)
+    flagged = [f for f in flagged if f.get("is_violation")]
+    if not flagged:
+        return []
+
+    out: list[Advice] = []
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for f in flagged:
+        by_type.setdefault(f["resource_type"], []).append(f)
+
+    for rtype, group in by_type.items():
+        hint = _REGION_LOCK_HINTS.get(rtype, {})
+        summary = hint.get(
+            "summary",
+            "Resource is region-locked to us-east-1; deploy separately.",
+        )
+        commands = list(hint.get("commands", []))
+        notes: list[str] = []
+        for f in group:
+            notes.append(
+                f"- `{f['resource_logical_id']}` — target region "
+                f"`{f['target_region']}` / required `{f['required_region']}`. "
+                f"{f['note']}"
+            )
+        out.append(
+            Advice(
+                layer="region-lock",
+                priority="red",
+                resource_type=rtype,
+                title=f"{rtype} 必须在 us-east-1（{len(group)} 项）",
+                detail=summary + "\n" + "\n".join(notes),
+                options=[
+                    "⭐ 拆出独立 us-east-1 stack，先部署 ACM/WAFv2/Lambda@Edge，再部署 CloudFront",
+                    "在 CloudFront 主模板中 Parameter 化 ARN，手工填写 us-east-1 ARN",
+                    "使用 CloudFormation StackSets 管理跨 region 依赖",
+                ],
+                commands=commands,
+                resources=[f["resource_logical_id"] for f in group],
+            )
+        )
+    return out
+
+
 ALL_RULES: list[RuleFn] = [
     rule_rds,
     rule_dynamodb,
@@ -784,20 +911,26 @@ def _integration_cross_account_rules(
 
 
 def generate_advice(
-    resources: list[dict[str, Any]], source_account: str = ""
+    resources: list[dict[str, Any]],
+    source_account: str = "",
+    target_region: str = "",
 ) -> list[Advice]:
     """Run all rules and return the collected :class:`Advice` list.
 
     When *source_account* is supplied, the cross-account ARN rules
     (Step Functions Definition + Lambda Env) also run and contribute to the
-    integration layer. Omitted for backward compatibility with callers that
-    cannot determine the source account.
+    integration layer. When *target_region* is supplied and not us-east-1, the
+    region-lock rule emits ``🌐 Region 约束`` advice for CloudFront / WAFv2 /
+    ACM / Lambda@Edge resources. Both arguments default to "" for backward
+    compatibility.
     """
     out: list[Advice] = []
     for rule in ALL_RULES:
         out.extend(rule(resources))
     if source_account:
         out.extend(_integration_cross_account_rules(resources, source_account))
+    if target_region:
+        out.extend(rule_region_lock(resources, target_region))
     return out
 
 
@@ -904,6 +1037,15 @@ def main() -> None:
             "advice for Step Functions Definition + Lambda Env."
         ),
     )
+    parser.add_argument(
+        "--target-region",
+        default="",
+        help=(
+            "Optional target region. When set to anything other than "
+            "us-east-1, emits Hotfix C region-lock advice for CloudFront / "
+            "WAFv2 (CLOUDFRONT scope) / ACM / Lambda@Edge resources."
+        ),
+    )
     args = parser.parse_args()
 
     path = Path(args.input)
@@ -913,7 +1055,11 @@ def main() -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     resources = data.get("resources", []) if isinstance(data, dict) else data
 
-    advice = generate_advice(resources, source_account=args.source_account)
+    advice = generate_advice(
+        resources,
+        source_account=args.source_account,
+        target_region=args.target_region,
+    )
 
     if args.format == "md":
         text = render_markdown(advice, args.stack_name)

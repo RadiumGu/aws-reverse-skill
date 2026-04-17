@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Hotfix C fixture — region-locked resource detection (R15).
+
+Resources:
+
+  MyCert:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: app.example.com
+      ValidationMethod: DNS
+
+  MyCloudFrontWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: my-cloudfront-webacl
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: my-cloudfront-webacl
+
+  MyRegionalWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: my-regional-webacl
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: my-regional-webacl
+
+  MyEdgeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: my-edge-viewer-request
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: arn:aws:iam::111111111111:role/edge-lambda-role
+      Description: Lambda@Edge handler for viewer-request events on MyDist.
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => event.Records[0].cf.request;
+
+  MyRegularFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: my-regular-function
+      Runtime: python3.12
+      Handler: index.handler
+      Role: arn:aws:iam::111111111111:role/lambda-role
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {"ok": True}
+
+  MyDist:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Aliases:
+          - app.example.com
+        DefaultCacheBehavior:
+          TargetOriginId: my-origin
+          ViewerProtocolPolicy: redirect-to-https
+          LambdaFunctionAssociations:
+            - EventType: viewer-request
+              LambdaFunctionARN: arn:aws:lambda:us-east-1:111111111111:function:my-edge-viewer-request:1
+        Origins:
+          - Id: my-origin
+            DomainName: origin.example.com
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+        ViewerCertificate:
+          AcmCertificateArn: !Ref MyCert
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        WebACLId: !GetAtt MyCloudFrontWebACL.Arn

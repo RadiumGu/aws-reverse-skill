@@ -60,6 +60,7 @@ from arn_rewriter import (  # noqa: E402
     rewrite_arn,
     rewrite_arns_in_text,
 )
+from region_lock import find_region_locked  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +74,13 @@ PHASE2_RULES: frozenset[str] = frozenset(
     {"kms", "peering", "route53", "iam_principal", "s3_bucket_name"}
 )
 PHASE3_RULES: frozenset[str] = frozenset(
-    {"vpc_resource_ids", "sg_cidr", "nested_arn_string", "nested_arn_json"}
+    {
+        "vpc_resource_ids",
+        "sg_cidr",
+        "nested_arn_string",
+        "nested_arn_json",
+        "region_lock",
+    }
 )
 # Historical ALL_RULES = Phase 1 + 2 (kept for backward compatibility with
 # existing test expectations). Use ALL_RULES_EXTENDED for callers that want
@@ -273,6 +280,8 @@ class _Context:
         self.external_arn_parameters: dict[str, dict[str, str]] = {}
         #: R13/R14 — warnings for skipped JSON blobs, CFN intrinsics, etc.
         self.nested_arn_warnings: list[str] = []
+        #: R15 — target region (used by region-lock detection).
+        self.target_region: str = ""
         self.review_decisions: list[dict[str, Any]] = []
 
 
@@ -1344,6 +1353,61 @@ def add_external_arn_parameters(template: CommentedMap, ctx: _Context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# R15 — region-locked resource detection (advisory only)
+# ---------------------------------------------------------------------------
+
+
+def apply_region_lock_rule(
+    template: CommentedMap, ctx: _Context
+) -> None:
+    """R15 — flag resources pinned to a specific region (CloudFront / WAFv2 /
+    ACM / Lambda@Edge) as ``region-constraint`` review decisions.
+
+    Advisory only — no YAML mutation happens here. The caller supplies the
+    target region via ``ctx.target_region``; when it matches the resource's
+    ``required_region`` (``us-east-1``) the resource is still surfaced but
+    marked ``is_violation=False`` so downstream tooling can confirm the OK
+    case.
+    """
+    if "region_lock" not in ctx.rules:
+        return
+    try:
+        locked = find_region_locked(template, ctx.target_region)
+    except Exception as exc:  # pragma: no cover — defensive
+        ctx.nested_arn_warnings.append(f"R15 error: {exc}")
+        return
+    for entry in locked:
+        if not entry.get("is_violation"):
+            continue
+        logical_id = entry["resource_logical_id"]
+        rtype = entry["resource_type"]
+        decision = {
+            "id": f"D.region-constraint.{logical_id}",
+            "kind": "region-constraint",
+            "category": "region-constraint",
+            "resource": logical_id,
+            "resource_logical_id": logical_id,
+            "resource_type": rtype,
+            "required_region": entry["required_region"],
+            "target_region": entry["target_region"],
+            "affected_properties": list(entry.get("affected_properties", [])),
+            "note": entry["note"],
+            "is_violation": True,
+            "suggested_action": (
+                "Split this resource into a separate us-east-1 stack OR ensure "
+                "the referenced resource (ACM cert / WAFv2 ACL) lives in "
+                "us-east-1."
+            ),
+            "detail": (
+                f"{rtype} `{logical_id}` requires region "
+                f"{entry['required_region']}, but target region is "
+                f"{entry['target_region']}."
+            ),
+        }
+        _record_review(ctx, decision)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1355,6 +1419,7 @@ def rewrite_template(
     rules: set[str] | frozenset[str] | None = None,
     review_decisions: list[dict[str, Any]] | None = None,
     source_vpc_cidrs: list[str] | None = None,
+    target_region: str = "",
 ) -> CommentedMap:
     """Apply rewrite rules to *template* in place.
 
@@ -1379,6 +1444,7 @@ def rewrite_template(
     ctx = _Context(
         active_rules, account_id, source_region, source_vpc_cidrs=source_vpc_cidrs
     )
+    ctx.target_region = target_region or ""
     resources = template.get("Resources")
     if resources:
         _walk(resources, ctx)
@@ -1396,6 +1462,8 @@ def rewrite_template(
         apply_nested_arn_string_rule(resources, ctx)
         # R14 — JSON-embedded ARN scan (Step Functions / IAM policies).
         apply_nested_arn_json_rule(resources, ctx)
+        # R15 — region-locked resource detection (advisory only; no mutation).
+        apply_region_lock_rule(template, ctx)
 
     # Add parameters for any captured rewrites.
     add_ami_parameter(template, ctx.ami_ids)
@@ -1582,6 +1650,7 @@ def main() -> None:
         rules=rules,
         review_decisions=decisions,
         source_vpc_cidrs=source_vpc_cidrs,
+        target_region=args.target_region,
     )
 
     if args.output:

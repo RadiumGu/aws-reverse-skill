@@ -277,6 +277,7 @@ def _decision_kind(d: dict[str, Any]) -> str:
         ("D.sg-cidr-public-check", "sg-cidr-public-check"),
         ("D.sg-cidr-aws-range", "sg-cidr-aws-range"),
         ("D.cross-account-arn", "cross-account-arn"),
+        ("D.region-constraint", "region-constraint"),
         ("D.peering", "peering"),
         ("D.data-migration", "data-migration"),
         ("D.iam-trust", "iam-trust"),
@@ -342,6 +343,46 @@ def _build_cross_account_arn_section(
     return lines
 
 
+def _build_region_constraint_section(
+    decisions: list[dict[str, Any]],
+) -> list[str]:
+    """Render the 🌐 Region 约束资源 table emitted by R15."""
+    if not decisions:
+        return []
+    lines = ["### 🌐 Region 约束资源 (R15)", ""]
+    lines.append(
+        "| Resource | Type | Required Region | Target Region | Affected Properties | Suggested Action |"
+    )
+    lines.append(
+        "|----------|------|-----------------|---------------|---------------------|------------------|"
+    )
+    for d in decisions:
+        resource = d.get("resource_logical_id") or d.get("resource") or "?"
+        rtype = d.get("resource_type", "?")
+        req = d.get("required_region", "us-east-1")
+        tgt = d.get("target_region", "?") or "?"
+        props = d.get("affected_properties") or []
+        props_cell = ", ".join(props) if props else "—"
+        if req == tgt:
+            action = "✅ OK"
+        else:
+            action = (
+                "⚠️ Split into separate us-east-1 stack OR ensure the "
+                "referenced resource (ACM cert / WAFv2 ACL) lives in us-east-1"
+            )
+        lines.append(
+            f"| `{resource}` | {rtype} | {req} | {tgt} | {props_cell} | {action} |"
+        )
+    lines.append("")
+    for d in decisions:
+        note = d.get("note")
+        if note:
+            resource = d.get("resource_logical_id") or d.get("resource") or "?"
+            lines.append(f"- `{resource}`: {note}")
+    lines.append("")
+    return lines
+
+
 def _build_sg_cidr_section(sg_decisions: list[dict[str, Any]]) -> list[str]:
     """Render the SG CIDR audit block grouped by resource_logical_id."""
     if not sg_decisions:
@@ -397,6 +438,7 @@ def build_decisions_section(decisions: list[dict[str, Any]]) -> str:
     vpc_mapping: list[dict[str, Any]] = []
     sg_cidr: list[dict[str, Any]] = []
     cross_account_arn: list[dict[str, Any]] = []
+    region_constraint: list[dict[str, Any]] = []
     legacy: list[dict[str, Any]] = []
     for d in decisions:
         kind = _decision_kind(d)
@@ -406,6 +448,8 @@ def build_decisions_section(decisions: list[dict[str, Any]]) -> str:
             sg_cidr.append(d)
         elif kind == "cross-account-arn":
             cross_account_arn.append(d)
+        elif kind == "region-constraint":
+            region_constraint.append(d)
         else:
             legacy.append(d)
 
@@ -413,6 +457,7 @@ def build_decisions_section(decisions: list[dict[str, Any]]) -> str:
     lines.extend(_build_vpc_resource_mapping_section(vpc_mapping))
     lines.extend(_build_sg_cidr_section(sg_cidr))
     lines.extend(_build_cross_account_arn_section(cross_account_arn))
+    lines.extend(_build_region_constraint_section(region_constraint))
     for d in legacy:
         lines.extend(_build_generic_decision_block(d))
     return "\n".join(lines)
