@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Hotfix A Wave A2 fixture — Security Group CIDR classification cases.
+
+Resources:
+
+  AppSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App SG covering all four CIDR classes.
+      VpcId: vpc-0abcdef1234567890
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.0.1.0/24
+          Description: vpc-internal (source VPC is 10.0.0.0/16)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 192.168.10.0/24
+          Description: rfc1918-external (on-prem / peer)
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 203.0.113.5/32
+          Description: public — admin bastion
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: public — default any-route
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: ::/0
+          Description: public IPv6 any-route
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ExtraIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: sg-0aaa111222333aaaa
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      CidrIp: 10.0.2.0/24
+      Description: standalone ingress — vpc-internal

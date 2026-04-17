@@ -14,6 +14,7 @@ from deployment_advice import (  # type: ignore  # noqa: E402
     rule_ami,
     rule_iam_trust,
     rule_kms_cross,
+    rule_prefix_list,
     rule_rds,
     rule_s3,
     rule_vpc_peering,
@@ -98,6 +99,73 @@ def test_rule_kms_cross_triggers_on_any_cmk():
     assert advice
     assert advice[0].layer == "identity"
     assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in advice[0].resources
+
+
+def _load_shared_cidr_raw():
+    data = json.loads(
+        (FIXTURES / "sample_raw_sg_shared.json").read_text()
+    )
+    return data["resources"]
+
+
+def test_rule_prefix_list_triggers_when_two_sgs_share_public_cidr():
+    """PrefixList rule fires for public CIDRs duplicated across ≥2 SGs."""
+    advice = rule_prefix_list(_load_shared_cidr_raw())
+
+    assert advice, "expected PrefixList advice when two SGs share a public CIDR"
+    entry = advice[0]
+    assert entry.layer == "network"
+    assert "PrefixList" in entry.title
+    assert "203.0.113.5/32" in entry.resources
+    joined = entry.detail + " " + " ".join(entry.commands)
+    assert "create-managed-prefix-list" in joined
+
+
+def test_rule_prefix_list_ignores_rfc1918_and_default_route():
+    """RFC1918 + 0.0.0.0/0 shared CIDRs do NOT trigger the PrefixList rule."""
+    private_only = [
+        {
+            "Type": "AWS::EC2::SecurityGroup",
+            "PhysicalId": "sg-a",
+            "SecurityGroupIngress": [
+                {"IpProtocol": "tcp", "CidrIp": "10.0.0.0/16"},
+                {"IpProtocol": "-1", "CidrIp": "0.0.0.0/0"},
+            ],
+        },
+        {
+            "Type": "AWS::EC2::SecurityGroup",
+            "PhysicalId": "sg-b",
+            "SecurityGroupIngress": [
+                {"IpProtocol": "tcp", "CidrIp": "10.0.0.0/16"},
+                {"IpProtocol": "-1", "CidrIp": "0.0.0.0/0"},
+            ],
+        },
+    ]
+    assert rule_prefix_list(private_only) == []
+
+
+def test_rule_prefix_list_requires_two_distinct_sgs():
+    """A single SG listing the same public CIDR twice does NOT trigger."""
+    single = [
+        {
+            "Type": "AWS::EC2::SecurityGroup",
+            "PhysicalId": "sg-lonely",
+            "SecurityGroupIngress": [
+                {"IpProtocol": "tcp", "CidrIp": "198.51.100.10/32"},
+                {"IpProtocol": "tcp", "CidrIp": "198.51.100.10/32"},
+            ],
+        },
+    ]
+    assert rule_prefix_list(single) == []
+
+
+def test_render_markdown_includes_prefix_list_section():
+    """The markdown render emits a network section with the PrefixList advice."""
+    advice = rule_prefix_list(_load_shared_cidr_raw())
+    md = render_markdown(advice, stack_name="shared-cidr")
+    assert "网络层" in md
+    assert "PrefixList" in md
+    assert "create-managed-prefix-list" in md
 
 
 def test_generate_advice_renderers_agree_on_coverage():
