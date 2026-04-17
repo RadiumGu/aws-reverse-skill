@@ -265,20 +265,123 @@ def _to_plain(node: Any) -> Any:
     return str(node)
 
 
+def _decision_kind(d: dict[str, Any]) -> str:
+    """Classify a decision into one of the known section buckets."""
+    explicit = d.get("kind")
+    if explicit:
+        return str(explicit)
+    did = str(d.get("id", ""))
+    for prefix, kind in (
+        ("D.vpc-resource-mapping", "vpc-resource-mapping"),
+        ("D.sg-cidr-rfc1918", "sg-cidr-rfc1918"),
+        ("D.sg-cidr-public-check", "sg-cidr-public-check"),
+        ("D.sg-cidr-aws-range", "sg-cidr-aws-range"),
+        ("D.peering", "peering"),
+        ("D.data-migration", "data-migration"),
+        ("D.iam-trust", "iam-trust"),
+        ("D.kms-cross-account", "kms-cross-account"),
+        ("D.precheck-fail", "precheck-fail"),
+    ):
+        if did.startswith(prefix):
+            return kind
+    return "other"
+
+
+def _build_vpc_resource_mapping_section(
+    mappings: list[dict[str, Any]],
+) -> list[str]:
+    """Render the VPC resource mapping table for R11 Parameters."""
+    if not mappings:
+        return []
+    lines = ["### 🔧 VPC 资源映射（R11 Parameter 填写）", ""]
+    lines.append("| Parameter Name | Source ID | Required Type | Target Value |")
+    lines.append("|----------------|-----------|---------------|--------------|")
+    for d in mappings:
+        name = d.get("parameter_name") or d.get("resource") or "?"
+        source_ids = d.get("source_ids") or []
+        source_cell = ", ".join(source_ids) if source_ids else "N/A"
+        required_type = d.get("required_type", "String")
+        lines.append(
+            f"| {name} | {source_cell} | {required_type} | **<请填>** |"
+        )
+    lines.append("")
+    for d in mappings:
+        hint = d.get("suggested_action") or d.get("detail", "")
+        if hint:
+            lines.append(f"- `{d.get('parameter_name', d.get('resource', '?'))}`: {hint}")
+    lines.append("")
+    return lines
+
+
+def _build_sg_cidr_section(sg_decisions: list[dict[str, Any]]) -> list[str]:
+    """Render the SG CIDR audit block grouped by resource_logical_id."""
+    if not sg_decisions:
+        return []
+    # Group by resource_logical_id (fallback to resource field).
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for d in sg_decisions:
+        rid = d.get("resource_logical_id") or d.get("resource") or "unknown"
+        grouped.setdefault(str(rid), []).append(d)
+
+    lines = ["### 🌐 SG CIDR 审阅（R12 分类结果）", ""]
+    for rid in sorted(grouped):
+        lines.append(f"#### Security Group `{rid}`")
+        lines.append("")
+        lines.append(
+            "| Direction | Port | Source CIDR | Category | Target CIDR / Action |"
+        )
+        lines.append(
+            "|-----------|------|-------------|----------|----------------------|"
+        )
+        for d in grouped[rid]:
+            direction = d.get("direction", "?")
+            port = d.get("port", "?")
+            cidr = d.get("cidr", "?")
+            category = d.get("classification") or d.get("kind", "?")
+            action = d.get("suggested_action", "")
+            lines.append(
+                f"| {direction} | {port} | `{cidr}` | {category} | {action} |"
+            )
+        lines.append("")
+    return lines
+
+
+def _build_generic_decision_block(d: dict[str, Any]) -> list[str]:
+    """Render the legacy free-form decision block (peering/data/iam/kms/etc)."""
+    lines = [f"### {d['id']} — {d.get('title', d.get('detail', ''))}", ""]
+    detail = d.get("detail", "")
+    if detail and detail != d.get("title"):
+        lines.append(detail)
+        lines.append("")
+    for field in d.get("fields", []):
+        lines.append("```")
+        lines.append(field)
+        lines.append("```")
+    lines.append("")
+    return lines
+
+
 def build_decisions_section(decisions: list[dict[str, Any]]) -> str:
     if not decisions:
         return "## ⚠️ 需人工决策（skill 无法自动处理）\n\n_无_\n"
+
+    vpc_mapping: list[dict[str, Any]] = []
+    sg_cidr: list[dict[str, Any]] = []
+    legacy: list[dict[str, Any]] = []
+    for d in decisions:
+        kind = _decision_kind(d)
+        if kind == "vpc-resource-mapping":
+            vpc_mapping.append(d)
+        elif kind.startswith("sg-cidr"):
+            sg_cidr.append(d)
+        else:
+            legacy.append(d)
+
     lines = ["## ⚠️ 需人工决策（skill 无法自动处理）", ""]
-    for i, d in enumerate(decisions, 1):
-        lines.append(f"### {d['id']} — {d['title']}")
-        lines.append("")
-        lines.append(d.get("detail", ""))
-        lines.append("")
-        for field in d.get("fields", []):
-            lines.append(f"```")
-            lines.append(field)
-            lines.append(f"```")
-        lines.append("")
+    lines.extend(_build_vpc_resource_mapping_section(vpc_mapping))
+    lines.extend(_build_sg_cidr_section(sg_cidr))
+    for d in legacy:
+        lines.extend(_build_generic_decision_block(d))
     return "\n".join(lines)
 
 
@@ -368,6 +471,22 @@ def parse_existing_review(md_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _merge_decisions(
+    base: list[dict[str, Any]], extra: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge two decision lists de-duplicated by ``id``."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for d in [*base, *extra]:
+        did = str(d.get("id", ""))
+        if did and did in seen:
+            continue
+        if did:
+            seen.add(did)
+        out.append(d)
+    return out
+
+
 def build_review_markdown(
     template: CommentedMap,
     raw_resources: list[dict[str, Any]],
@@ -379,6 +498,7 @@ def build_review_markdown(
     source_account: str = "",
     filled_values: dict[str, str] | None = None,
     previous_unchecked: set[str] | None = None,
+    external_decisions: list[dict[str, Any]] | None = None,
 ) -> str:
     header = [
         f"# Deployment Review — {stack_name or 'unnamed-stack'}",
@@ -389,7 +509,8 @@ def build_review_markdown(
 
     params_md, _ = build_parameters_section(template, filled_values)
     resources_md, _ = build_resources_section(template, previous_unchecked)
-    decisions = detect_decisions(template, raw_resources, source_account)
+    detected = detect_decisions(template, raw_resources, source_account)
+    decisions = _merge_decisions(detected, external_decisions or [])
     decisions_md = build_decisions_section(decisions)
     precheck_section = build_precheck_section(precheck_md)
 
@@ -429,6 +550,14 @@ def main() -> None:
         action="store_true",
         help="Preserve existing parameter values + checkbox states from --output file.",
     )
+    parser.add_argument(
+        "--decisions",
+        default="",
+        help=(
+            "Optional review-decisions JSON produced by rewrite_cfn "
+            "(merged into the ⚠️ section)."
+        ),
+    )
     args = parser.parse_args()
 
     template = load_template(Path(args.cleaned))
@@ -438,6 +567,21 @@ def main() -> None:
         if args.precheck_report and Path(args.precheck_report).exists()
         else None
     )
+
+    external_decisions: list[dict[str, Any]] = []
+    if args.decisions:
+        dec_path = Path(args.decisions)
+        if dec_path.exists():
+            try:
+                loaded = json.loads(dec_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                print(
+                    f"WARN: could not parse --decisions file: {exc}",
+                    file=sys.stderr,
+                )
+                loaded = []
+            if isinstance(loaded, list):
+                external_decisions = [d for d in loaded if isinstance(d, dict)]
 
     filled: dict[str, str] = {}
     unchecked: set[str] = set()
@@ -457,6 +601,7 @@ def main() -> None:
         source_account=args.source_account,
         filled_values=filled,
         previous_unchecked=unchecked,
+        external_decisions=external_decisions,
     )
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(md, encoding="utf-8")
