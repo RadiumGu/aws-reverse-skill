@@ -10,7 +10,7 @@
       "rules": ["region", "ami_id", "az", "deletion_policy"]
     },
     "cross-account": {
-      "description": "Different account (same or different region). Full Phase 1 + KMS + IAM principal flag + S3 bucket prefix + peering review + VPC/Subnet/SG ID parameterization + SG CIDR classification.",
+      "description": "Different account (same or different region). Full Phase 1 + KMS + IAM principal flag + S3 bucket prefix + peering review + VPC/Subnet/SG ID parameterization + SG CIDR classification + nested ARN rewriting.",
       "rules": [
         "account_id",
         "region",
@@ -22,7 +22,9 @@
         "s3_bucket_name",
         "peering",
         "vpc_resource_ids",
-        "sg_cidr"
+        "sg_cidr",
+        "nested_arn_string",
+        "nested_arn_json"
       ]
     },
     "full": {
@@ -39,7 +41,9 @@
         "iam_principal",
         "s3_bucket_name",
         "vpc_resource_ids",
-        "sg_cidr"
+        "sg_cidr",
+        "nested_arn_string",
+        "nested_arn_json"
       ]
     }
   }
