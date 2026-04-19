@@ -51,5 +51,23 @@ def test_dry_run_bucket_override_is_used():
     assert result.returncode == 0, result.stderr
     combined = result.stdout + result.stderr
     assert "my-custom-bucket" in combined
-    # sts get-caller-identity should be skipped when bucket is overridden
-    assert "aws sts get-caller-identity" not in combined
+    # sts get-caller-identity is still invoked to resolve the caller
+    # principal ARN for the bucket policy, even when --bucket is overridden.
+    assert "aws sts get-caller-identity" in combined
+
+
+def test_dry_run_emits_bucket_policy():
+    result = _run([
+        "--instance-id", "i-abc",
+        "--region", "us-east-1",
+        "--dry-run",
+    ])
+    assert result.returncode == 0, result.stderr
+    combined = result.stdout + result.stderr
+    assert "aws s3api put-bucket-policy" in combined
+    assert "aws ec2 describe-instances" in combined
+    # Policy content should include the Deny statements
+    assert "DenyOtherPrincipals" in combined
+    assert "DenyInsecureTransport" in combined
+    assert "aws:PrincipalArn" in combined
+    assert "aws:SecureTransport" in combined
