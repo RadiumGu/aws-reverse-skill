@@ -45,7 +45,67 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/SecurityAudit
+      Policies:
+        - PolicyName: DenySecretsAndParameters
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DenySecretsManagerReads
+                Effect: Deny
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:GetResourcePolicy
+                  - secretsmanager:ListSecretVersionIds
+                Resource: '*'
+              - Sid: DenySSMParameterReads
+                Effect: Deny
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParameterHistory
+                  - ssm:GetParametersByPath
+                Resource: '*'
+              - Sid: DenyKmsDecrypt
+                Effect: Deny
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: '*'
+        - PolicyName: Former2ExtraDescribe
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Former2ResourceDescribe
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - ec2:GetEbsEncryptionByDefault
+                  - rds:Describe*
+                  - rds:ListTagsForResource
+                  - elasticloadbalancing:Describe*
+                  - autoscaling:Describe*
+                  - cloudfront:List*
+                  - cloudfront:Get*
+                  - route53:List*
+                  - route53:Get*
+                  - s3:ListAllMyBuckets
+                  - s3:GetBucket*
+                  - s3:GetEncryptionConfiguration
+                  - lambda:List*
+                  - lambda:Get*
+                  - dynamodb:List*
+                  - dynamodb:Describe*
+                  - apigateway:GET
+                  - ecs:List*
+                  - ecs:Describe*
+                  - eks:List*
+                  - eks:Describe*
+                  - sns:List*
+                  - sns:Get*
+                  - sqs:List*
+                  - sqs:GetQueueAttributes
+                Resource: '*'
       Tags:
         - Key: Name
           Value: !Ref StackTag

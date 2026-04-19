@@ -51,7 +51,24 @@ def test_ec2_instance_security_and_iam(template):
     managed = role["Properties"]["ManagedPolicyArns"]
     joined = " ".join(managed)
     assert "AmazonSSMManagedInstanceCore" in joined
-    assert "ReadOnlyAccess" in joined
+    assert "SecurityAudit" in joined
+    assert "ReadOnlyAccess" not in joined
+
+    policies = role["Properties"].get("Policies", [])
+    policy_names = [p["PolicyName"] for p in policies]
+    assert "DenySecretsAndParameters" in policy_names
+    deny_policy = next(p for p in policies if p["PolicyName"] == "DenySecretsAndParameters")
+    statements = deny_policy["PolicyDocument"]["Statement"]
+    deny_actions = set()
+    for stmt in statements:
+        if stmt["Effect"] == "Deny":
+            actions = stmt["Action"]
+            if isinstance(actions, str):
+                actions = [actions]
+            deny_actions.update(actions)
+    assert "secretsmanager:GetSecretValue" in deny_actions
+    assert "ssm:GetParametersByPath" in deny_actions
+    assert any(a.startswith("ssm:GetParameter") for a in deny_actions)
 
 
 def test_cfn_lint_passes():
