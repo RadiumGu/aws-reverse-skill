@@ -685,6 +685,21 @@ def main() -> None:
     Path(args.output).write_text(md, encoding="utf-8")
     print(f"Wrote review.md to {args.output}", file=sys.stderr)
 
+    from audit import record_stage
+    audit_inputs = [args.cleaned]
+    if args.raw:
+        audit_inputs.append(args.raw)
+    if args.precheck_report:
+        audit_inputs.append(args.precheck_report)
+    if args.decisions:
+        audit_inputs.append(args.decisions)
+    record_stage(
+        step="review",
+        inputs=audit_inputs,
+        outputs=[args.output],
+        notes=f"update={args.update} preset={args.preset or '-'}",
+    )
+
 
 if __name__ == "__main__":
     main()

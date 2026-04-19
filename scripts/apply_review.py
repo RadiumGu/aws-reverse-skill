@@ -360,6 +360,21 @@ def main() -> None:
         file=sys.stderr,
     )
 
+    from audit import record_stage
+    audit_outputs = [args.out_final, args.out_params, args.out_manual]
+    if args.diff:
+        audit_outputs.append(args.diff)
+    record_stage(
+        step="apply_review",
+        inputs=[args.review, args.cleaned],
+        outputs=audit_outputs,
+        notes=(
+            f"params={len(summary['parameters'])} "
+            f"removed={len(summary['removed'])} "
+            f"manual={len(summary['manual'])}"
+        ),
+    )
+
 
 if __name__ == "__main__":
     main()

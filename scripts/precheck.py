@@ -573,6 +573,20 @@ def main() -> None:
     else:
         print(markdown)
 
+    from audit import record_stage
+    audit_inputs = [str(template_path)]
+    if raw_path:
+        audit_inputs.append(str(raw_path))
+    record_stage(
+        step="precheck",
+        inputs=audit_inputs,
+        outputs=[args.output] if args.output else [],
+        notes=(
+            f"failures={len(report.failures)} warnings={len(report.warnings)} "
+            f"deep={args.deep}"
+        ),
+    )
+
     # Non-zero exit only on failures (WARN is tolerated)
     sys.exit(1 if report.failures else 0)
 

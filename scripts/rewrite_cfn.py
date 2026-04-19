@@ -88,7 +88,8 @@ PHASE3_RULES: frozenset[str] = frozenset(
 ALL_RULES: frozenset[str] = PHASE1_RULES | PHASE2_RULES
 ALL_RULES_EXTENDED: frozenset[str] = PHASE1_RULES | PHASE2_RULES | PHASE3_RULES
 
-#: Known AWS region codes (commercial partitions).
+#: Known AWS region codes — commercial + China (aws-cn) + GovCloud (aws-us-gov)
+#: partitions. Region → partition is resolved by :func:`partition_for_region`.
 KNOWN_REGIONS: frozenset[str] = frozenset(
     [
         "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -100,8 +101,34 @@ KNOWN_REGIONS: frozenset[str] = frozenset(
         "eu-south-1", "eu-south-2",
         "sa-east-1", "ca-central-1", "ca-west-1",
         "me-south-1", "me-central-1", "af-south-1", "il-central-1",
+        # China partition (aws-cn)
+        "cn-north-1", "cn-northwest-1",
+        # GovCloud partition (aws-us-gov)
+        "us-gov-west-1", "us-gov-east-1",
     ]
 )
+
+#: Regions in the aws-cn partition.
+CHINA_REGIONS: frozenset[str] = frozenset({"cn-north-1", "cn-northwest-1"})
+#: Regions in the aws-us-gov partition.
+GOVCLOUD_REGIONS: frozenset[str] = frozenset({"us-gov-west-1", "us-gov-east-1"})
+
+
+def partition_for_region(region: str) -> str:
+    """Return the AWS partition name for a region code.
+
+    Args:
+        region: AWS region (e.g. ``us-east-1``, ``cn-north-1``, ``us-gov-west-1``).
+
+    Returns:
+        One of ``aws``, ``aws-cn``, ``aws-us-gov``. Unknown regions default to
+        ``aws`` (commercial) to preserve backward-compatible behaviour.
+    """
+    if region in CHINA_REGIONS:
+        return "aws-cn"
+    if region in GOVCLOUD_REGIONS:
+        return "aws-us-gov"
+    return "aws"
 
 _AZ_PATTERN: re.Pattern[str] = re.compile(
     r"^("
@@ -1668,6 +1695,17 @@ def main() -> None:
             f"Wrote {len(decisions)} review decisions to {args.review_decisions}",
             file=sys.stderr,
         )
+
+    from audit import record_stage
+    audit_outputs = [args.output] if args.output else []
+    if args.review_decisions and decisions:
+        audit_outputs.append(args.review_decisions)
+    record_stage(
+        step="rewrite",
+        inputs=[str(input_path)] + ([args.raw] if args.raw else []),
+        outputs=audit_outputs,
+        notes=f"preset={args.preset or '-'} rules={','.join(sorted(rules)) if rules else 'default'}",
+    )
 
 
 if __name__ == "__main__":

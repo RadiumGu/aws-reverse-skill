@@ -274,6 +274,14 @@ def main() -> None:
     else:
         print(output_json)
 
+    from audit import record_stage
+    record_stage(
+        step="filter",
+        inputs=[str(input_path)],
+        outputs=[args.output] if args.output else [],
+        notes=f"{len(resources)} → {len(filtered)} resources",
+    )
+
 
 if __name__ == "__main__":
     main()
