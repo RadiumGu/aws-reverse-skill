@@ -7,6 +7,8 @@ compliance-friendly)** with an 11-step review loop, deployment-advice
 generator, audit log, and multi-partition (commercial / China / GovCloud)
 support.
 
+> **New here?** Start with the [Quick Start guide](docs/quick-start.md) — scan → filter → rewrite → deploy in 5 minutes.
+
 See [SKILL.md](SKILL.md) for the full skill specification consumed by Claude
 Code / Kiro / OpenClaw agents.
 
