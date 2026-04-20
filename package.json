@@ -10,6 +10,7 @@
     "former2": "0.3.1"
   },
   "scripts": {
-    "scan": "node scripts/scan.js"
+    "scan": "node scripts/scan.js",
+    "postinstall": "bash scripts/postinstall.sh"
   }
 }

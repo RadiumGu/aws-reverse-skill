@@ -341,11 +341,13 @@ def main() -> None:
     import sys
     from pathlib import Path
 
-    parser = argparse.ArgumentParser(description="Scan/rewrite ARNs in text")
+    parser = argparse.ArgumentParser(description="Scan/rewrite ARNs in text or CFN YAML")
     parser.add_argument("--text", help="Text string to scan for ARNs")
     parser.add_argument("--file", help="File path to scan for ARNs")
+    parser.add_argument("--output", help="Write rewritten content to file (instead of stdout)")
     parser.add_argument("--source-account", default="", help="Source AWS account ID")
     parser.add_argument("--source-region", default="", help="Source AWS region")
+    parser.add_argument("--target-region", default="", help="Target region (informational, included in output)")
     parser.add_argument("--format", choices=["text", "json"], default="text")
     args = parser.parse_args()
 
@@ -358,7 +360,11 @@ def main() -> None:
 
     arns = find_arns(text)
     if not arns:
-        print("No ARNs found." if args.format == "text" else "[]")
+        print("No ARNs found." if args.format == "text" else "[]",
+              file=sys.stderr if args.output else sys.stdout)
+        if args.output and args.file:
+            Path(args.output).write_text(text, encoding="utf-8")
+            print(f"Wrote (unchanged) to {args.output}", file=sys.stderr)
         return
 
     if args.source_account or args.source_region:
@@ -367,7 +373,18 @@ def main() -> None:
             source_account=args.source_account,
             source_region=args.source_region,
         )
-        if args.format == "json":
+        new_text = result.get("new_text", text)
+
+        # Write rewritten content to --output if specified
+        if args.output:
+            Path(args.output).write_text(new_text, encoding="utf-8")
+            rewrites = [r for r in result.get("rewrites", []) if r.get("action") != "unchanged"]
+            print(f"Wrote rewritten content to {args.output} ({len(rewrites)} ARN(s) rewritten)",
+                  file=sys.stderr)
+            if result.get("parameters_needed"):
+                print(f"Parameters needed: {list(result['parameters_needed'].keys())}",
+                      file=sys.stderr)
+        elif args.format == "json":
             print(json.dumps(result, indent=2))
         else:
             for r in result.get("rewrites", []):
