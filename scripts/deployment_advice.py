@@ -879,6 +879,45 @@ def rule_region_lock(
     return out
 
 
+def rule_rollback_orphans(resources: list[dict[str, Any]]) -> list[Advice]:
+    """Warn about resources with DeletionPolicy: Retain that become orphans on rollback."""
+    retain_types = {
+        "AWS::RDS::DBInstance", "AWS::RDS::DBCluster",
+        "AWS::S3::Bucket", "AWS::DynamoDB::Table", "AWS::EFS::FileSystem",
+    }
+    found = [r for r in resources if isinstance(r, dict) and r.get("Type") in retain_types]
+    if not found:
+        return []
+    type_names = sorted({r["Type"].split("::")[-1] for r in found})
+    return [
+        Advice(
+            layer="data",
+            priority="yellow",
+            resource_type="Multiple",
+            title="⚠️ Rollback Orphan Risk — DeletionPolicy: Retain",
+            detail=(
+                f"The template applies `DeletionPolicy: Retain` to {len(found)} "
+                f"resource(s) ({', '.join(type_names)}). If CloudFormation rolls back "
+                "or the stack is deleted, these resources survive as *orphans* — "
+                "still running, still billing, but no longer managed by CFN."
+            ),
+            commands=[
+                "# After a rollback, list orphaned resources:",
+                "aws cloudformation list-stack-resources \\",
+                "  --stack-name <STACK> \\",
+                "  --query \"StackResourceSummaries[?ResourceStatus=='DELETE_SKIPPED']\"",
+                "",
+                "# Clean up orphans manually:",
+                "# - S3: aws s3 rb s3://<bucket> --force",
+                "# - RDS: aws rds delete-db-instance --db-instance-id <id> --skip-final-snapshot",
+                "# - DynamoDB: aws dynamodb delete-table --table-name <name>",
+                "# - EFS: aws efs delete-file-system --file-system-id <id>",
+            ],
+            resources=[r.get("PhysicalResourceId", r.get("Type", "")) for r in found],
+        )
+    ]
+
+
 ALL_RULES: list[RuleFn] = [
     rule_rds,
     rule_dynamodb,
@@ -897,6 +936,7 @@ ALL_RULES: list[RuleFn] = [
     rule_cloudwatch_logs,
     rule_eventbridge,
     rule_acm,
+    rule_rollback_orphans,
 ]
 
 
