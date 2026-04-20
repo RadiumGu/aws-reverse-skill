@@ -32,7 +32,7 @@ pytestmark = pytest.mark.skipif(
 SCRIPTS = Path(__file__).resolve().parent.parent.parent / "scripts"
 REGION = os.environ.get("AWS_E2E_REGION", "ap-northeast-1")
 ACCOUNT_ID = os.environ.get("AWS_E2E_ACCOUNT_ID", "")
-PROFILE = os.environ.get("AWS_E2E_PROFILE", "default")
+PROFILE = os.environ.get("AWS_E2E_PROFILE", "")
 SERVICES = os.environ.get("AWS_E2E_SERVICES", "Lambda,S3")
 
 
@@ -59,14 +59,16 @@ def scan_output(work_dir):
     """Step 1: Scan — produce raw.json and cfn-full.yml."""
     raw_path = work_dir / "raw.json"
     cfn_path = work_dir / "cfn-full.yml"
-    result = _run([
+    args = [
         "node", str(SCRIPTS / "scan.js"),
         "--region", REGION,
         "--services", SERVICES,
-        "--profile", PROFILE,
         "--out-raw", str(raw_path),
         "--out-cfn", str(cfn_path),
-    ])
+    ]
+    if PROFILE:
+        args += ["--profile", PROFILE]
+    result = _run(args, env={**dict(os.environ), "AWS_SDK_LOAD_CONFIG": "1"})
     assert result.returncode == 0, f"scan.js failed:\n{result.stderr}"
     assert raw_path.exists() and raw_path.stat().st_size > 0
     assert cfn_path.exists()
@@ -164,7 +166,7 @@ def precheck_output(rewrite_output, work_dir):
         pytest.skip("precheck.py not found")
     result = _run([
         sys.executable, str(precheck_script),
-        "--input", str(rewrite_output["cleaned"]),
+        "--template", str(rewrite_output["cleaned"]),
         "--region", REGION,
     ])
     # Precheck may warn but should not crash

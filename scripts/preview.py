@@ -20,14 +20,13 @@ from typing import Any
 
 
 def load_resources(path: Path) -> list[dict[str, Any]]:
-    """Load raw.json and return the resources list."""
-    with path.open(encoding="utf-8") as fh:
-        data = json.load(fh)
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        return data.get("resources", [])
-    raise ValueError(f"Unexpected JSON structure in {path}")
+    """Load raw.json and return normalized resources list.
+
+    Auto-detects former2 format (``f2type``/``f2id``/``f2data``) and converts
+    to pipeline format (``Type``/``PhysicalResourceId``/``Tags``).
+    """
+    from scanner_interface import load_resources_as_dicts
+    return load_resources_as_dicts(path)
 
 
 def service_of(resource: dict[str, Any]) -> str:

@@ -90,7 +90,7 @@ CloudFormation parameters and pseudo-references.
 
 ```bash
 # Validate the template
-python3 scripts/precheck.py --input out/cleaned.yml --region ap-northeast-1
+python3 scripts/precheck.py --template out/cleaned.yml --region ap-northeast-1
 
 # Deploy
 aws cloudformation deploy \

@@ -13,6 +13,143 @@ from pathlib import Path
 from typing import Any
 
 
+# ---------------------------------------------------------------------------
+# former2 f2type → AWS CloudFormation Type mapping
+# ---------------------------------------------------------------------------
+
+#: Maps ``f2type`` values (``service.resource``) to AWS CFN resource types.
+#: Extend as needed when former2 adds new resource support.
+_F2TYPE_TO_CFN: dict[str, str] = {
+    "autoscaling.autoscalinggroup": "AWS::AutoScaling::AutoScalingGroup",
+    "autoscaling.lifecyclehook": "AWS::AutoScaling::LifecycleHook",
+    "dynamodb.acceleratorparametergroup": "AWS::DAX::ParameterGroup",
+    "dynamodb.table": "AWS::DynamoDB::Table",
+    "ec2.flowlog": "AWS::EC2::FlowLog",
+    "ec2.instance": "AWS::EC2::Instance",
+    "ec2.launchtemplate": "AWS::EC2::LaunchTemplate",
+    "ec2.networkinterface": "AWS::EC2::NetworkInterface",
+    "ec2.networkinterfaceattachment": "AWS::EC2::NetworkInterfaceAttachment",
+    "ec2.networkinterfacepermission": "AWS::EC2::NetworkInterfacePermission",
+    "ec2.securitygroup": "AWS::EC2::SecurityGroup",
+    "ec2.subnet": "AWS::EC2::Subnet",
+    "ec2.volume": "AWS::EC2::Volume",
+    "ec2.volumeattachment": "AWS::EC2::VolumeAttachment",
+    "ec2.vpc": "AWS::EC2::VPC",
+    "elbv2.loadbalancer": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    "elbv2.loadbalancerlistener": "AWS::ElasticLoadBalancingV2::Listener",
+    "elbv2.loadbalancerlistenercertificate": "AWS::ElasticLoadBalancingV2::ListenerCertificate",
+    "elbv2.loadbalancerlistenerrule": "AWS::ElasticLoadBalancingV2::ListenerRule",
+    "elbv2.targetgroup": "AWS::ElasticLoadBalancingV2::TargetGroup",
+    "iam.role": "AWS::IAM::Role",
+    "iam.policy": "AWS::IAM::Policy",
+    "iam.instanceprofile": "AWS::IAM::InstanceProfile",
+    "lambda.eventsourcemapping": "AWS::Lambda::EventSourceMapping",
+    "lambda.function": "AWS::Lambda::Function",
+    "lambda.layerversion": "AWS::Lambda::LayerVersion",
+    "lambda.permission": "AWS::Lambda::Permission",
+    "lambda.version": "AWS::Lambda::Version",
+    "rds.cluster": "AWS::RDS::DBCluster",
+    "rds.clusterparametergroup": "AWS::RDS::DBClusterParameterGroup",
+    "rds.instance": "AWS::RDS::DBInstance",
+    "rds.parametergroup": "AWS::RDS::DBParameterGroup",
+    "rds.subnetgroup": "AWS::RDS::DBSubnetGroup",
+    "s3.bucket": "AWS::S3::Bucket",
+    "efs.filesystem": "AWS::EFS::FileSystem",
+    "kms.key": "AWS::KMS::Key",
+    "sns.topic": "AWS::SNS::Topic",
+    "sqs.queue": "AWS::SQS::Queue",
+    "route53.hostedzone": "AWS::Route53::HostedZone",
+    "route53.recordset": "AWS::Route53::RecordSet",
+    "eks.cluster": "AWS::EKS::Cluster",
+    "eks.nodegroup": "AWS::EKS::Nodegroup",
+    "ecr.repository": "AWS::ECR::Repository",
+    "cloudwatch.alarm": "AWS::CloudWatch::Alarm",
+    "logs.loggroup": "AWS::Logs::LogGroup",
+    "events.rule": "AWS::Events::Rule",
+    "acm.certificate": "AWS::CertificateManager::Certificate",
+    "cloudfront.distribution": "AWS::CloudFront::Distribution",
+    "wafv2.webacl": "AWS::WAFv2::WebACL",
+    "stepfunctions.statemachine": "AWS::StepFunctions::StateMachine",
+}
+
+# Alias for backward compatibility
+ScannerInterface = None  # set below after Scanner class definition
+
+
+def _f2type_to_cfn(f2type: str) -> str:
+    """Convert a former2 ``f2type`` (e.g. ``lambda.function``) to AWS CFN type.
+
+    Falls back to a best-effort ``AWS::<Service>::<Resource>`` conversion when
+    the exact mapping is not in the lookup table.
+    """
+    lower = f2type.lower()
+    if lower in _F2TYPE_TO_CFN:
+        return _F2TYPE_TO_CFN[lower]
+    # Best-effort: service.resource → AWS::Service::Resource
+    parts = lower.split(".", 1)
+    if len(parts) == 2:
+        svc = parts[0].upper() if len(parts[0]) <= 4 else parts[0].capitalize()
+        # Map common service abbreviations
+        svc_map = {
+            "ec2": "EC2", "rds": "RDS", "s3": "S3", "iam": "IAM",
+            "efs": "EFS", "kms": "KMS", "sns": "SNS", "sqs": "SQS",
+            "eks": "EKS", "ecr": "ECR", "acm": "CertificateManager",
+            "elbv2": "ElasticLoadBalancingV2", "lambda": "Lambda",
+            "dynamodb": "DynamoDB", "cloudwatch": "CloudWatch",
+            "cloudfront": "CloudFront", "route53": "Route53",
+            "autoscaling": "AutoScaling", "logs": "Logs",
+            "events": "Events", "wafv2": "WAFv2",
+            "stepfunctions": "StepFunctions",
+        }
+        svc = svc_map.get(parts[0], svc)
+        res = parts[1].replace("_", " ").title().replace(" ", "")
+        return f"AWS::{svc}::{res}"
+    return f2type
+
+
+def normalize_former2_resource(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a former2 raw.json resource dict to the pipeline-expected format.
+
+    former2 uses ``f2type``/``f2id``/``f2data``/``f2region`` fields.
+    The pipeline expects ``Type``/``PhysicalResourceId``/``Tags``/``Region``.
+
+    If the dict already has a ``Type`` field (non-former2 format), it is
+    returned unchanged.
+    """
+    if "Type" in raw and "f2type" not in raw:
+        return raw  # already in pipeline format
+
+    f2type = raw.get("f2type", "")
+    f2id = raw.get("f2id", "")
+    f2data = raw.get("f2data", {}) if isinstance(raw.get("f2data"), dict) else {}
+    f2region = raw.get("f2region", "")
+
+    # Extract tags from f2data — former2 stores them as a list of {Key, Value}
+    raw_tags = f2data.get("Tags", [])
+    tags: dict[str, str] = {}
+    if isinstance(raw_tags, list):
+        for tag in raw_tags:
+            if isinstance(tag, dict) and "Key" in tag and "Value" in tag:
+                tags[tag["Key"]] = tag["Value"]
+    elif isinstance(raw_tags, dict):
+        tags = raw_tags
+
+    # Build normalized dict — merge f2data properties as top-level
+    result: dict[str, Any] = dict(f2data)
+    result["Type"] = _f2type_to_cfn(f2type) if f2type else ""
+    result["PhysicalResourceId"] = f2id
+    if f2region:
+        result["Region"] = f2region
+    if tags:
+        result["Tags"] = tags
+
+    # Preserve original former2 fields for traceability
+    result["_f2type"] = f2type
+    result["_f2id"] = f2id
+
+    return result
+
+
 class Resource:
     """Normalized resource representation used across the pipeline.
 
@@ -54,16 +191,23 @@ class Resource:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Resource:
-        """Create from a former2 raw.json resource dict."""
+        """Create from a raw.json resource dict (auto-detects former2 format)."""
+        normed = normalize_former2_resource(data)
+        tags = normed.get("Tags")
+        if isinstance(tags, list):
+            tags = {t["Key"]: t["Value"] for t in tags if isinstance(t, dict) and "Key" in t}
+        elif not isinstance(tags, dict):
+            tags = {}
         return cls(
-            type=data.get("Type", ""),
-            physical_id=data.get("PhysicalResourceId", ""),
-            region=data.get("Region", ""),
-            tags=data.get("Tags") if isinstance(data.get("Tags"), dict) else {},
+            type=normed.get("Type", ""),
+            physical_id=normed.get("PhysicalResourceId", ""),
+            region=normed.get("Region", ""),
+            tags=tags,
             properties={
                 k: v
-                for k, v in data.items()
-                if k not in ("Type", "PhysicalResourceId", "Region", "Tags")
+                for k, v in normed.items()
+                if k not in ("Type", "PhysicalResourceId", "Region", "Tags",
+                             "_f2type", "_f2id")
             },
         )
 
@@ -87,13 +231,12 @@ class Scanner(ABC):
         ...
 
 
-class Former2Scanner(Scanner):
-    """Scanner backed by an existing former2 raw.json file.
+# Backward-compatible alias (BUG-09)
+ScannerInterface = Scanner
 
-    This is the default — it reads an already-produced raw.json rather than
-    invoking former2 directly. The scan.js Node script handles the actual
-    former2 invocation.
-    """
+
+class Former2Scanner(Scanner):
+    """Scanner backed by an existing former2 raw.json file."""
 
     def __init__(self, raw_path: Path) -> None:
         self._path = raw_path
@@ -118,16 +261,26 @@ class Former2Scanner(Scanner):
         return [Resource.from_dict(item) for item in items if isinstance(item, dict)]
 
 
-def load_resources(path: Path) -> list[Resource]:
-    """Convenience: load resources from a raw.json file via Former2Scanner."""
-    return Former2Scanner(path).scan()
-
-
-def load_resources_as_dicts(path: Path) -> list[dict[str, Any]]:
-    """Load resources as plain dicts (backward-compatible with existing code)."""
+def _load_raw_items(path: Path) -> list[dict[str, Any]]:
+    """Load raw items from a JSON file (list or {resources: [...]})."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
         return data.get("resources", [])
     raise ValueError(f"Unexpected JSON structure in {path}")
+
+
+def load_resources(path: Path) -> list[Resource]:
+    """Convenience: load resources from a raw.json file via Former2Scanner."""
+    return Former2Scanner(path).scan()
+
+
+def load_resources_as_dicts(path: Path) -> list[dict[str, Any]]:
+    """Load resources as normalized pipeline dicts.
+
+    Auto-detects former2 format (``f2type``/``f2id``/``f2data``) and converts
+    to the pipeline-expected format (``Type``/``PhysicalResourceId``/``Tags``).
+    """
+    items = _load_raw_items(path)
+    return [normalize_former2_resource(item) for item in items if isinstance(item, dict)]

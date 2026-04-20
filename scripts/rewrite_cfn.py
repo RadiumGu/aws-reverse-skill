@@ -479,7 +479,7 @@ def main() -> None:
     else:
         print(dump_yaml(template))
 
-    if args.review_decisions and decisions:
+    if args.review_decisions:
         Path(args.review_decisions).write_text(
             json.dumps(decisions, indent=2), encoding="utf-8"
         )

@@ -281,3 +281,42 @@ def find_region_locked(
 
 
 __all__ = ["REGION_LOCKED_RESOURCES", "find_region_locked"]
+
+
+def main() -> None:
+    """CLI entry point: detect region-locked resources in a CFN template."""
+    import argparse
+    import json
+    import sys
+    from pathlib import Path
+    from ruamel.yaml import YAML
+
+    parser = argparse.ArgumentParser(description="Detect region-locked CFN resources")
+    parser.add_argument("--input", required=True, help="Path to CFN YAML template")
+    parser.add_argument("--target-region", required=True, help="Target deployment region")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    args = parser.parse_args()
+
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    with Path(args.input).open(encoding="utf-8") as fh:
+        template = yaml.load(fh)
+
+    results = find_region_locked(template, args.target_region)
+    violations = [r for r in results if r.get("is_violation")]
+
+    if args.format == "json":
+        print(json.dumps(violations, indent=2))
+    else:
+        if not violations:
+            print(f"No region-lock violations for target region {args.target_region}")
+        else:
+            for v in violations:
+                print(f"⚠️  {v['resource_type']} `{v['resource_logical_id']}` "
+                      f"requires {v['required_region']}, target is {v['target_region']}")
+                print(f"   {v['note']}")
+        print(f"\n{len(violations)} violation(s) found.")
+
+
+if __name__ == "__main__":
+    main()

@@ -332,3 +332,57 @@ def rewrite_arns_in_text(
         "rewrites": rewrites,
         "parameters_needed": parameters_needed,
     }
+
+
+def main() -> None:
+    """CLI entry point: scan and rewrite ARNs in a text string or file."""
+    import argparse
+    import json
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Scan/rewrite ARNs in text")
+    parser.add_argument("--text", help="Text string to scan for ARNs")
+    parser.add_argument("--file", help="File path to scan for ARNs")
+    parser.add_argument("--source-account", default="", help="Source AWS account ID")
+    parser.add_argument("--source-region", default="", help="Source AWS region")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    args = parser.parse_args()
+
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+    elif args.text:
+        text = args.text
+    else:
+        text = sys.stdin.read()
+
+    arns = find_arns(text)
+    if not arns:
+        print("No ARNs found." if args.format == "text" else "[]")
+        return
+
+    if args.source_account or args.source_region:
+        result = rewrite_arns_in_text(
+            text,
+            source_account=args.source_account,
+            source_region=args.source_region,
+        )
+        if args.format == "json":
+            print(json.dumps(result, indent=2))
+        else:
+            for r in result.get("rewrites", []):
+                action = r.get("action", "unchanged")
+                print(f"  {action}: {r.get('original', '')} → {r.get('rewritten', r.get('original', ''))}")
+            if result.get("parameters_needed"):
+                print(f"\nParameters needed: {list(result['parameters_needed'].keys())}")
+    else:
+        if args.format == "json":
+            print(json.dumps(arns, indent=2))
+        else:
+            for arn in arns:
+                print(f"  {arn}")
+            print(f"\n{len(arns)} ARN(s) found.")
+
+
+if __name__ == "__main__":
+    main()

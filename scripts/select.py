@@ -219,17 +219,8 @@ def main() -> None:
         print(f"ERROR: input file not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
-    with input_path.open(encoding="utf-8") as fh:
-        data = json.load(fh)
-
-    # former2 raw.json wraps resources in {"resources": [...]}
-    if isinstance(data, dict):
-        resources: list[dict[str, Any]] = data.get("resources", [])
-    elif isinstance(data, list):
-        resources = data
-    else:
-        print("ERROR: unexpected JSON structure in input file", file=sys.stderr)
-        sys.exit(1)
+    from scanner_interface import load_resources_as_dicts
+    resources = load_resources_as_dicts(input_path)
 
     filters: dict[str, Any] = {
         "services": (

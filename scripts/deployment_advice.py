@@ -1092,8 +1092,8 @@ def main() -> None:
     if not path.exists():
         print(f"ERROR: input not found: {path}", file=sys.stderr)
         sys.exit(1)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    resources = data.get("resources", []) if isinstance(data, dict) else data
+    from scanner_interface import load_resources_as_dicts
+    resources = load_resources_as_dicts(path)
 
     advice = generate_advice(
         resources,
